@@ -5,7 +5,7 @@ const Daemon = @import("Daemon.zig");
 
 pub const std_options: std.Options = .{
     // TODO: FIXME: submit patch to zig (errno=111 below)
-    .unexpected_error_tracing = true,
+    .unexpected_error_tracing = false,
 };
 const log = std.log.scoped(.zmy);
 
@@ -13,6 +13,8 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const gpa = init.gpa;
     const io = init.io;
+
+    const shell = init.environ_map.get("SHELL") orelse "/bin/sh";
 
     const rundir = if (init.environ_map.get("ZMY_DIR")) |zmy_rundir|
         try arena.dupe(u8, zmy_rundir)
@@ -28,8 +30,6 @@ pub fn main(init: std.process.Init) !void {
 
     const session_name = init.environ_map.get("ZMY_SESSION");
 
-    const shell = init.environ_map.get("SHELL") orelse "/bin/sh";
-
     var args = init.minimal.args.iterate();
     _ = args.next();
     const cmd = args.next() orelse return help(io);
@@ -39,9 +39,9 @@ pub fn main(init: std.process.Init) !void {
         return runDaemon(
             gpa,
             io,
+            try arena.dupeZ(u8, shell),
             rundir,
             try arena.dupeZ(u8, session_name_),
-            try arena.dupeZ(u8, shell),
         );
     }
 
@@ -67,14 +67,10 @@ fn help(io: std.Io) !void {
         \\
     ;
 
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    var stdout_file_writer = std.Io.File.stdout().writer(io, &.{});
     const stdout_writer = &stdout_file_writer.interface;
 
     stdout_writer.writeAll(help_text) catch |err| switch (err) {
-        error.WriteFailed => return stdout_file_writer.err.?,
-    };
-    stdout_writer.flush() catch |err| switch (err) {
         error.WriteFailed => return stdout_file_writer.err.?,
     };
 }
@@ -82,19 +78,19 @@ fn help(io: std.Io) !void {
 fn runDaemon(
     gpa: std.mem.Allocator,
     io: std.Io,
+    shell: [:0]const u8,
     rundir: []const u8,
     session_name: [:0]const u8,
-    shell: [:0]const u8,
 ) !void {
     const path = try std.fs.path.join(gpa, &.{ rundir, session_name });
     defer gpa.free(path);
 
     const address: std.Io.net.UnixAddress = try .init(path);
 
-    var daemon = try Daemon.init(io, address, shell);
-    defer daemon.deinit();
+    var daemon = try Daemon.init(io, shell, address);
+    defer daemon.deinit(io);
 
-    try daemon.loop();
+    try daemon.loop(gpa, io);
 }
 
 fn runAttach(
@@ -126,9 +122,9 @@ fn runAttach(
             retries += 1;
         }
     };
-    defer client.deinit();
+    defer client.deinit(io);
 
-    try client.loop();
+    try client.loop(io);
 }
 
 fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
@@ -138,7 +134,7 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
     switch (std.c.errno(pid)) {
         .SUCCESS => {},
         else => |err| {
-            log.err("fork() failed: {}", .{err});
+            log.err("fork() failed: {t}", .{err});
             return error.ForkError;
         },
     }
@@ -149,7 +145,7 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
     switch (std.c.errno(std.c.setsid())) {
         .SUCCESS => {},
         else => |err| {
-            log.err("setsid() failed: {}", .{err});
+            log.err("setsid() failed: {t}", .{err});
             std.process.exit(1);
         },
     }
@@ -165,7 +161,7 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
         switch (std.c.errno(dev_null)) {
             .SUCCESS => {},
             else => |err| {
-                log.err("open(/dev/null, O_RDWR) failed: {}", .{err});
+                log.err("open(/dev/null, O_RDWR) failed: {t}", .{err});
                 std.process.exit(1);
             },
         }
@@ -173,7 +169,7 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
             switch (std.c.errno(std.c.dup2(dev_null, fd))) {
                 .SUCCESS => {},
                 else => |err| {
-                    log.err("dup2({}, {}) failed: {}", .{ dev_null, fd, err });
+                    log.err("dup2({}, {}) failed: {t}", .{ dev_null, fd, err });
                     std.process.exit(1);
                 },
             }
@@ -181,7 +177,7 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
         switch (std.c.errno(std.c.close(dev_null))) {
             .SUCCESS => {},
             else => |err| {
-                log.err("close({}) failed: {}", .{ dev_null, err });
+                log.err("close({}) failed: {t}", .{ dev_null, err });
                 std.process.exit(1);
             },
         }
@@ -208,27 +204,27 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
 
         const log_file = std.c.open(
             path,
-            .{ .ACCMODE = .RDWR, .CREAT = true },
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
             @as(std.c.mode_t, 0o644),
         );
         switch (std.c.errno(log_file)) {
             .SUCCESS => {},
             else => |err| {
-                log.err("open({s}, O_RDWR | O_CREAT) failed: {}", .{ path, err });
+                log.err("open({s}, O_WRONLY | O_CREAT | O_TRUNC, 0o644) failed: {t}", .{ path, err });
                 std.process.exit(1);
             },
         }
         switch (std.c.errno(std.c.dup2(log_file, std.c.STDERR_FILENO))) {
             .SUCCESS => {},
             else => |err| {
-                log.err("dup2({}, {}) failed: {}", .{ log_file, std.c.STDERR_FILENO, err });
+                log.err("dup2({}, {}) failed: {t}", .{ log_file, std.c.STDERR_FILENO, err });
                 std.process.exit(1);
             },
         }
         switch (std.c.errno(std.c.close(log_file))) {
             .SUCCESS => {},
             else => |err| {
-                log.err("close({}) failed: {}", .{ log_file, err });
+                log.err("close({}) failed: {t}", .{ log_file, err });
                 std.process.exit(1);
             },
         }
