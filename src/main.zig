@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.Io.Dir.cwd().createDir(io, rundir, @enumFromInt(0o755)) catch |err| switch (err) {
         error.PathAlreadyExists => {},
-        else => return err,
+        else => |e| return e,
     };
 
     const session_name = init.environ_map.get("ZMY_SESSION");
@@ -112,8 +112,8 @@ fn runAttach(
             } else |err| switch (err) {
                 error.FileNotFound,
                 error.Unexpected, // errno=111 ECONNREFUSED
-                => if (retries == 2) return err,
-                else => return err,
+                => |e| if (retries == 2) return e,
+                else => |e| return e,
             }
             if (retries == 0) {
                 try spawnDaemon(rundir, session_name);
@@ -124,7 +124,7 @@ fn runAttach(
     };
     defer client.deinit(io);
 
-    try client.loop(io);
+    try client.loop(gpa, io);
 }
 
 fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
@@ -237,7 +237,10 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
         std.c.environ,
     ))) {
         .SUCCESS => unreachable,
-        else => std.process.exit(1),
+        else => |err| {
+            log.err("execve() failed: {t}", .{err});
+            std.process.exit(1);
+        },
     }
 }
 
@@ -249,16 +252,25 @@ fn closeStderrIfTty() !void {
     const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .RDWR });
     switch (std.c.errno(dev_null)) {
         .SUCCESS => {},
-        else => return error.OpenError,
+        else => |err| {
+            log.err("open(/dev/null, O_RDWR) failed: {t}", .{err});
+            return error.OpenError;
+        },
     }
 
     switch (std.c.errno(std.c.dup2(dev_null, std.c.STDERR_FILENO))) {
         .SUCCESS => {},
-        else => return error.Dup2Error,
+        else => |err| {
+            log.err("dup2({}, {}) failed: {t}", .{ dev_null, std.c.STDERR_FILENO, err });
+            return error.Dup2Error;
+        },
     }
 
     switch (std.c.errno(std.c.close(dev_null))) {
         .SUCCESS => {},
-        else => return error.CloseError,
+        else => |err| {
+            log.err("close({}) failed: {t}", .{ dev_null, err });
+            return error.CloseError;
+        },
     }
 }
