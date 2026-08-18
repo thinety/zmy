@@ -120,11 +120,11 @@ pub fn mainLoop(
                 }
             },
             .pty_input => |data| {
-                log.info("Event.pty_input: data={x}", .{data});
+                log.info("Event.pty_input: data={b64}", .{data});
                 try pty_input_queue.putOne(io, .{ .data = data });
             },
             .pty_output => |data| {
-                log.info("Event.pty_output: data={x}", .{data});
+                log.info("Event.pty_output: data={b64}", .{data});
 
                 vt_stream.nextSlice(data);
                 gpa.free(data);

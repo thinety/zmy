@@ -65,7 +65,7 @@ fn readStream_(
 
                 try reader.readSliceAll(data);
 
-                log.info("DaemonMessage.data: data={x}", .{data});
+                log.info("DaemonMessage.data: data={b64}", .{data});
 
                 try writer.writeAll(data);
             },

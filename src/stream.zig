@@ -62,7 +62,7 @@ pub const Handler = struct {
         value: Action.Value(action),
     ) void {
         self.vtFallible(action, value) catch |err| {
-            std.log.warn("error handling VT action action={} err={}", .{ action, err });
+            std.log.err("error handling VT action action={} err={}", .{ action, err });
         };
     }
 
@@ -211,7 +211,7 @@ pub const Handler = struct {
                     .blinking_bar => 5,
                     .steady_bar => 6,
                 };
-                try self.vt_stream.print("\x1b[ {d} q", .{style_val});
+                try self.vt_stream.print("\x1b[{d} q", .{style_val});
             },
             .erase_display_below => {
                 self.terminal.eraseDisplay(.below, value);
@@ -460,7 +460,55 @@ pub const Handler = struct {
             .set_attribute => {
                 try self.terminal.setAttribute(value);
 
-                try self.encodeSgrAttribute(self.vt_stream, value);
+                try self.vt_stream.writeAll("\x1b[");
+                switch (value) {
+                    .unset => {}, // try self.vt_stream.writeByte('0'),
+                    .bold => try self.vt_stream.writeByte('1'),
+                    .faint => try self.vt_stream.writeByte('2'),
+                    .italic => try self.vt_stream.writeByte('3'),
+                    .underline => |u| switch (u) {
+                        .none => try self.vt_stream.writeAll("24"),
+                        .single => try self.vt_stream.writeByte('4'),
+                        .double => try self.vt_stream.writeAll("4:2"),
+                        .curly => try self.vt_stream.writeAll("4:3"),
+                        .dotted => try self.vt_stream.writeAll("4:4"),
+                        .dashed => try self.vt_stream.writeAll("4:5"),
+                    },
+                    .blink => try self.vt_stream.writeByte('5'),
+                    .inverse => try self.vt_stream.writeByte('7'),
+                    .invisible => try self.vt_stream.writeByte('8'),
+                    .strikethrough => try self.vt_stream.writeByte('9'),
+                    .reset_bold => try self.vt_stream.writeAll("22"),
+                    .reset_italic => try self.vt_stream.writeAll("23"),
+                    .reset_blink => try self.vt_stream.writeAll("25"),
+                    .reset_inverse => try self.vt_stream.writeAll("27"),
+                    .reset_invisible => try self.vt_stream.writeAll("28"),
+                    .reset_strikethrough => try self.vt_stream.writeAll("29"),
+                    .@"8_fg" => |c| try self.vt_stream.print("{d}", .{@intFromEnum(c) + 30}),
+                    .direct_color_fg => |c| try self.vt_stream.print("38;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
+                    .@"256_fg" => |idx| try self.vt_stream.print("38;5;{d}", .{idx}),
+                    .reset_fg => try self.vt_stream.writeAll("39"),
+                    .@"8_bg" => |c| try self.vt_stream.print("{d}", .{@intFromEnum(c) + 40}),
+                    .direct_color_bg => |c| try self.vt_stream.print("48;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
+                    .@"256_bg" => |idx| try self.vt_stream.print("48;5;{d}", .{idx}),
+                    .reset_bg => try self.vt_stream.writeAll("49"),
+                    .overline => try self.vt_stream.writeAll("53"),
+                    .reset_overline => try self.vt_stream.writeAll("55"),
+                    .underline_color => |c| try self.vt_stream.print("58;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
+                    .@"256_underline_color" => |idx| try self.vt_stream.print("58;5;{d}", .{idx}),
+                    .reset_underline_color => try self.vt_stream.writeAll("59"),
+                    .@"8_bright_fg" => |c| try self.vt_stream.print("{d}", .{@intFromEnum(c) + 82}),
+                    .@"8_bright_bg" => |c| try self.vt_stream.print("{d}", .{@intFromEnum(c) + 92}),
+                    // The "unknown" variant re-emits the raw parameters verbatim since
+                    // we can't map it to a known SGR code.
+                    .unknown => {
+                        for (value.unknown.full, 0..) |p, i| {
+                            if (i > 0) try self.vt_stream.writeByte(';');
+                            try self.vt_stream.print("{d}", .{p});
+                        }
+                    },
+                }
+                try self.vt_stream.writeByte('m');
             },
             .protected_mode_off => {
                 self.terminal.setProtectedMode(.off);
@@ -497,7 +545,8 @@ pub const Handler = struct {
                 self.terminal.screens.active.kitty_keyboard.set(.set, value.flags);
 
                 const flags_int = value.flags.int();
-                try self.vt_stream.print("\x1b[={d};1u", .{flags_int});
+                try self.vt_stream.print("\x1b[={d}u", .{flags_int});
+                // try self.vt_stream.print("\x1b[={d};1u", .{flags_int});
             },
             .kitty_keyboard_set_or => {
                 self.terminal.screens.active.kitty_keyboard.set(.@"or", value.flags);
@@ -583,9 +632,9 @@ pub const Handler = struct {
                     .end_command => 'D',
                 };
                 if (value.options_unvalidated.len == 0) {
-                    try self.vt_stream.print("\x1b]133;{c}\x07", .{action_char});
+                    try self.vt_stream.print("\x1b]133;{c}\x1b\\", .{action_char});
                 } else {
-                    try self.vt_stream.print("\x1b]133;{c};{s}\x07", .{ action_char, value.options_unvalidated });
+                    try self.vt_stream.print("\x1b]133;{c};{s}\x1b\\", .{ action_char, value.options_unvalidated });
                 }
             },
             .mouse_shape => {
@@ -878,6 +927,7 @@ pub const Handler = struct {
                 // }
             },
             .enquiry => {
+                // TODO(thiago): what does this do?
                 try self.vt_stream.writeByte(0x05);
             },
             .kitty_keyboard_query => {
@@ -892,7 +942,7 @@ pub const Handler = struct {
             },
             .request_mode => {
                 const report = self.terminal.modes.getReport(.fromMode(value.mode));
-                try self.sendModeReport(report);
+                try report.encode(self.pty);
 
                 // const mode_int = @intFromEnum(value.mode);
                 // const mode_tag: modes.ModeTag = @bitCast(mode_int);
@@ -907,7 +957,7 @@ pub const Handler = struct {
                     .value = @truncate(value.mode),
                     .ansi = value.ansi,
                 });
-                try self.sendModeReport(report);
+                try report.encode(self.pty);
 
                 // if (value.ansi) {
                 //     try self.vt_stream.print("\x1b[{d}$p", .{value.mode});
@@ -986,7 +1036,7 @@ pub const Handler = struct {
                     return;
                 };
 
-                try self.vt_stream.print("\x1b]0;{s}\x07", .{value.title});
+                try self.vt_stream.print("\x1b]0;{s}\x1b\\", .{value.title});
             },
             .report_pwd => {
                 // Prevent DoS attacks by limiting url length. Headroom for
@@ -1007,10 +1057,10 @@ pub const Handler = struct {
                     return;
                 };
 
-                // try self.vt_stream.print("\x1b]7;file://{s}\x07", .{value.url});
+                // try self.vt_stream.print("\x1b]7;file://{s}\x1b\\", .{value.url});
             },
             .xtversion => {
-                const version = "zmx 0.6.0";
+                const version = "zmy 0.0.1";
                 var buf: [288]u8 = undefined;
                 const resp = std.fmt.bufPrintZ(
                     &buf,
@@ -1022,7 +1072,7 @@ pub const Handler = struct {
                 // try self.vt_stream.writeAll("\x1b[>q");
             },
             .clipboard_contents => {
-                // try self.vt_stream.print("\x1b]52;{c};{s}\x07", .{ value.kind, value.data });
+                try self.vt_stream.print("\x1b]52;{c};{s}\x1b\\", .{ value.kind, value.data });
             },
 
             // No supported DCS commands have any terminal-modifying effects,
@@ -1044,7 +1094,7 @@ pub const Handler = struct {
 
             // Have no terminal-modifying effect
             .show_desktop_notification => {
-                try self.vt_stream.print("\x1b]9;{s};{s}\x07", .{ value.title, value.body });
+                try self.vt_stream.print("\x1b]9;{s};{s}\x1b\\", .{ value.title, value.body });
             },
             .progress_report => {
                 // Re-emit the ConEmu OSC 9;4 progress report. The state is
@@ -1054,7 +1104,7 @@ pub const Handler = struct {
                 if (value.progress) |p| {
                     try self.vt_stream.print(";{d}", .{p});
                 }
-                try self.vt_stream.writeByte(0x07);
+                try self.vt_stream.writeAll("\x1b\\");
             },
             .title_push => {
                 try self.vt_stream.print("\x1b[22;0;{d}t", .{value});
@@ -1172,122 +1222,6 @@ pub const Handler = struct {
                     buf[len] = 0;
                     try self.pty.writeAll(buf[0..len :0]);
                 }
-            },
-        }
-    }
-
-    fn sendModeReport(self: *Handler, report: modes.Report) !void {
-        var buf: [modes.Report.max_size + 1]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&buf);
-        report.encode(&writer) catch |err| {
-            std.log.warn("error encoding mode report err={}", .{err});
-            return;
-        };
-        const len = writer.buffered().len;
-        buf[len] = 0;
-        try self.pty.writeAll(buf[0..len :0]);
-    }
-
-    fn encodeSgrAttribute(self: *Handler, writer: *std.Io.Writer, attr: ghostty_vt.sgr.Attribute) !void {
-        // The "unknown" variant re-emits the raw parameters verbatim since
-        // we can't map it to a known SGR code.
-        if (attr == .unknown) {
-            const u = attr.unknown;
-            try writer.writeAll("\x1b[");
-            for (u.full, 0..) |p, i| {
-                if (i > 0) try writer.writeByte(';');
-                try writer.print("{d}", .{p});
-            }
-            try writer.writeByte('m');
-            return;
-        }
-
-        try writer.writeAll("\x1b[");
-        switch (attr) {
-            .unknown => unreachable,
-            .unset => try writer.writeByte('0'),
-            .bold => try writer.writeByte('1'),
-            .reset_bold => try writer.writeAll("22"),
-            .italic => try writer.writeByte('3'),
-            .reset_italic => try writer.writeAll("23"),
-            .faint => try writer.writeByte('2'),
-            .underline => |u| switch (u) {
-                .none => try writer.writeAll("24"),
-                .single => try writer.writeByte('4'),
-                .double => try writer.writeAll("21"),
-                .curly => try writer.writeAll("4:3"),
-                .dotted => try writer.writeAll("4:4"),
-                .dashed => try writer.writeAll("4:5"),
-            },
-            .underline_color => |c| {
-                try writer.writeAll("58:2:");
-                try self.encodeColor(writer, c);
-            },
-            .@"256_underline_color" => |idx| try writer.print("4:5:{d}", .{idx}),
-            .reset_underline_color => try writer.writeAll("59"),
-            .overline => try writer.writeAll("53"),
-            .reset_overline => try writer.writeAll("55"),
-            .blink => try writer.writeByte('5'),
-            .reset_blink => try writer.writeAll("25"),
-            .inverse => try writer.writeByte('7'),
-            .reset_inverse => try writer.writeAll("27"),
-            .invisible => try writer.writeByte('8'),
-            .reset_invisible => try writer.writeAll("28"),
-            .strikethrough => try writer.writeByte('9'),
-            .reset_strikethrough => try writer.writeAll("29"),
-            .direct_color_fg => |c| {
-                try writer.writeAll("38:2:");
-                try self.encodeColor(writer, c);
-            },
-            .direct_color_bg => |c| {
-                try writer.writeAll("48:2:");
-                try self.encodeColor(writer, c);
-            },
-            .@"8_fg" => |c| {
-                try writer.writeAll("38:5:");
-                try self.encodeColor(writer, c);
-            },
-            .@"8_bg" => |c| {
-                try writer.writeAll("48:5:");
-                try self.encodeColor(writer, c);
-            },
-            .reset_fg => try writer.writeAll("39"),
-            .reset_bg => try writer.writeAll("49"),
-            .@"8_bright_fg" => |c| {
-                try writer.writeAll("38:5:");
-                try self.encodeColor(writer, c);
-            },
-            .@"8_bright_bg" => |c| {
-                try writer.writeAll("48:5:");
-                try self.encodeColor(writer, c);
-            },
-            .@"256_fg" => |idx| try writer.print("38:5:{d}", .{idx}),
-            .@"256_bg" => |idx| try writer.print("48:5:{d}", .{idx}),
-        }
-        try writer.writeByte('m');
-    }
-
-    fn encodeColor(self: *Handler, writer: *std.Io.Writer, color_val: anytype) !void {
-        _ = self;
-        const Type = @TypeOf(color_val);
-        const info = @typeInfo(Type);
-        switch (info) {
-            .@"enum" => {
-                try writer.print("{d}", .{@intFromEnum(color_val)});
-            },
-            .@"struct" => {
-                if (@hasField(Type, "r")) {
-                    try writer.print("{d}:{d}:{d}", .{
-                        color_val.r,
-                        color_val.g,
-                        color_val.b,
-                    });
-                } else {
-                    try writer.writeByte('0');
-                }
-            },
-            else => {
-                try writer.writeByte('0');
             },
         }
     }

@@ -82,7 +82,7 @@ fn readStream_(
 
                 try reader.readSliceAll(data);
 
-                log.info("ClientMessage.data: data={x}", .{data});
+                log.info("ClientMessage.data: data={b64}", .{data});
 
                 try event_queue.putOne(io, .{ .pty_input = data });
             },
@@ -117,7 +117,7 @@ fn writeStream_(
 
         switch (event) {
             .data => |data| {
-                log.info("Event.data: data={x}", .{data});
+                log.info("Event.data: data={b64}", .{data});
 
                 const message: ipc.DaemonMessage = .{ .data = .{ .length = data.len } };
 

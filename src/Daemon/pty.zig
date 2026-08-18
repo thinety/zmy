@@ -103,7 +103,7 @@ fn writePty_(
 
         switch (event) {
             .data => |data| {
-                log.info("Event.data: data={x}", .{data});
+                log.info("Event.data: data={b64}", .{data});
 
                 try writer.writeAll(data);
 
