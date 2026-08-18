@@ -75,17 +75,17 @@ pub const Handler = struct {
             .print => {
                 try self.terminal.print(value.cp);
 
-                var utf8_buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(@intCast(value.cp), &utf8_buf) catch return;
-                try self.vt_stream.writeAll(utf8_buf[0..len]);
+                var buf: [4]u8 = undefined;
+                const n = try std.unicode.utf8Encode(@intCast(value.cp), &buf);
+                try self.vt_stream.writeAll(buf[0..n]);
             },
             .print_slice => {
                 try self.terminal.printSlice(value.cps);
 
                 for (value.cps) |cp| {
-                    var utf8_buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(@intCast(cp), &utf8_buf) catch continue;
-                    try self.vt_stream.writeAll(utf8_buf[0..len]);
+                    var buf: [4]u8 = undefined;
+                    const n = try std.unicode.utf8Encode(@intCast(cp), &buf);
+                    try self.vt_stream.writeAll(buf[0..n]);
                 }
             },
             .print_repeat => {
@@ -822,28 +822,14 @@ pub const Handler = struct {
                             alloc,
                             kitty_cmd,
                         )) |resp| {
-                            // Encode and write the response if we have one.
-                            var buf: [1024]u8 = undefined;
-                            var writer: std.Io.Writer = .fixed(&buf);
-                            resp.encode(&writer) catch return;
-                            writer.writeByte(0) catch return;
-                            const final = writer.buffered();
-                            if (final.len > 3) try self.pty.writeAll(final[0 .. final.len - 1 :0]);
+                            try resp.encode(self.pty);
                         }
                     },
 
                     .glyph => |*glyph_req| {
                         const resp = self.terminal.glyphProtocol(alloc, glyph_req);
                         if (resp) |r| {
-                            // Glyph responses are short and bounded by the protocol
-                            // fields we emit, so this matches the Kitty response
-                            // buffer size above with ample headroom.
-                            var buf: [apc.glyph.Response.max_wire_bytes]u8 = undefined;
-                            var writer: std.Io.Writer = .fixed(&buf);
-                            r.formatWire(&writer) catch return;
-                            writer.writeByte(0) catch return;
-                            const final = writer.buffered();
-                            try self.pty.writeAll(final[0 .. final.len - 1 :0]);
+                            try r.formatWire(self.pty);
                         }
                     },
 
@@ -860,17 +846,7 @@ pub const Handler = struct {
             .device_attributes => {
                 const attrs: device_attributes.Attributes = .{};
 
-                var stack = std.heap.stackFallback(128, self.terminal.gpa());
-                const alloc = stack.get();
-
-                var aw: std.Io.Writer.Allocating = .init(alloc);
-                defer aw.deinit();
-
-                attrs.encode(value, &aw.writer) catch return;
-
-                const written = aw.toOwnedSliceSentinel(0) catch return;
-                defer alloc.free(written);
-                try self.pty.writeAll(written);
+                try attrs.encode(value, self.pty);
 
                 // switch (value) {
                 //     .primary => try self.vt_stream.writeAll("\x1b[c"),
@@ -894,12 +870,10 @@ pub const Handler = struct {
                             .y = self.terminal.screens.active.cursor.y,
                         };
 
-                        var buf: [64]u8 = undefined;
-                        const resp = std.fmt.bufPrintZ(&buf, "\x1B[{};{}R", .{
+                        try self.pty.print("\x1B[{};{}R", .{
                             pos.y + 1,
                             pos.x + 1,
-                        }) catch return;
-                        try self.pty.writeAll(resp);
+                        });
                     },
 
                     .color_scheme => {
@@ -911,12 +885,7 @@ pub const Handler = struct {
                             .potentially_visible
                         else
                             .not_visible;
-                        var buf: [device_status.max_visibility_report_encode_size]u8 = undefined;
-                        var writer: std.Io.Writer = .fixed(&buf);
-                        device_status.encodeVisibilityReport(&writer, visibility) catch return;
-                        const len = writer.buffered().len;
-                        buf[len] = 0;
-                        try self.pty.writeAll(buf[0..len :0]);
+                        try device_status.encodeVisibilityReport(self.pty, visibility);
                     },
                 }
 
@@ -931,12 +900,9 @@ pub const Handler = struct {
                 try self.vt_stream.writeByte(0x05);
             },
             .kitty_keyboard_query => {
-                // Max response is "\x1b[?31u\x00" (7 bytes): the flags are a u5 (max 31).
-                var buf: [32]u8 = undefined;
-                const resp = std.fmt.bufPrintZ(&buf, "\x1b[?{}u", .{
+                try self.pty.print("\x1b[?{}u", .{
                     self.terminal.screens.active.kitty_keyboard.current().int(),
-                }) catch return;
-                try self.pty.writeAll(resp);
+                });
 
                 // try self.vt_stream.writeAll("\x1b[?u");
             },
@@ -966,23 +932,10 @@ pub const Handler = struct {
                 // }
             },
             .size_report => {
-                // Almost all size reports will fit in 256 bytes so try that
-                // on the stack before falling back to a heap allocation.
-                var stack = std.heap.stackFallback(
-                    256,
-                    self.terminal.gpa(),
-                );
-                const alloc = stack.get();
-
-                // Allocating writing to accumulate the response.
-                var aw: std.Io.Writer.Allocating = .init(alloc);
-                defer aw.deinit();
-
-                // Build the response.
                 switch (value) {
                     .csi_21_t => {
                         const title = self.terminal.getTitle() orelse "";
-                        aw.writer.print("\x1b]l{s}\x1b\\", .{title}) catch return;
+                        try self.pty.print("\x1b]l{s}\x1b\\", .{title});
                     },
 
                     .csi_14_t, .csi_16_t, .csi_18_t => {
@@ -998,20 +951,13 @@ pub const Handler = struct {
                             .csi_18_t => .csi_18_t,
                             .csi_21_t => unreachable,
                         };
-                        size_report.encode(
-                            &aw.writer,
+                        try size_report.encode(
+                            self.pty,
                             report_style,
                             s,
-                        ) catch |err| {
-                            std.log.warn("error encoding size report err={}", .{err});
-                            return;
-                        };
+                        );
                     },
                 }
-
-                const resp = aw.toOwnedSliceSentinel(0) catch return;
-                defer alloc.free(resp);
-                try self.pty.writeAll(resp);
 
                 // switch (value) {
                 //     .csi_14_t => try self.vt_stream.writeAll("\x1b[14t"),
@@ -1031,10 +977,7 @@ pub const Handler = struct {
                     break :title value.title[0..max_title_len];
                 } else value.title;
 
-                self.terminal.setTitle(title) catch |err| {
-                    std.log.warn("error setting title err={}", .{err});
-                    return;
-                };
+                try self.terminal.setTitle(title);
 
                 try self.vt_stream.print("\x1b]0;{s}\x1b\\", .{value.title});
             },
@@ -1052,22 +995,13 @@ pub const Handler = struct {
 
                 // We store the raw payload unparsed. Embedders read it via
                 // getPwd() and are responsible for decoding any URI scheme.
-                self.terminal.setPwd(url) catch |err| {
-                    std.log.warn("error setting pwd err={}", .{err});
-                    return;
-                };
+                try self.terminal.setPwd(url);
 
                 // try self.vt_stream.print("\x1b]7;file://{s}\x1b\\", .{value.url});
             },
             .xtversion => {
                 const version = "zmy 0.0.1";
-                var buf: [288]u8 = undefined;
-                const resp = std.fmt.bufPrintZ(
-                    &buf,
-                    "\x1BP>|{s}\x1B\\",
-                    .{if (version.len > 0) version else "libghostty"},
-                ) catch return;
-                try self.pty.writeAll(resp);
+                try self.pty.print("\x1BP>|{s}\x1B\\", .{version});
 
                 // try self.vt_stream.writeAll("\x1b[>q");
             },
@@ -1215,12 +1149,7 @@ pub const Handler = struct {
                         .potentially_visible
                     else
                         .not_visible;
-                    var buf: [device_status.max_visibility_report_encode_size]u8 = undefined;
-                    var writer: std.Io.Writer = .fixed(&buf);
-                    device_status.encodeVisibilityReport(&writer, visibility) catch return;
-                    const len = writer.buffered().len;
-                    buf[len] = 0;
-                    try self.pty.writeAll(buf[0..len :0]);
+                    try device_status.encodeVisibilityReport(self.pty, visibility);
                 }
             },
         }
