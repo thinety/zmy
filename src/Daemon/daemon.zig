@@ -4,8 +4,8 @@ const ghostty = @import("ghostty-vt");
 const PtyEvent = @import("pty.zig").Event;
 const ClientEvent = @import("client.zig").Event;
 const handleClient = @import("client.zig").handleClient;
-const StreamHandler = @import("../stream.zig").Handler;
-const formatTerminal = @import("../formatter.zig").formatTerminal;
+const StreamHandler = @import("ghostty/stream.zig").Handler;
+const formatTerminal = @import("ghostty/formatter.zig").formatTerminal;
 
 const log = std.log.scoped(.zmy_daemon_daemon);
 
@@ -76,7 +76,7 @@ pub fn mainLoop(
     });
     defer term.deinit(gpa);
     var vt_stream = ghostty.Stream(StreamHandler).init(.{
-        .handler = .init(gpa, &pty_buffer.writer, &vt_stream_buffer.writer, &term),
+        .handler = .init(gpa, io, &pty_buffer.writer, &vt_stream_buffer.writer, &term),
         .allocator = gpa,
     });
     defer vt_stream.deinit();

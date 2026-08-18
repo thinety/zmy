@@ -1,10 +1,12 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
+const terminfo = @import("terminfo.zig");
 
 const Terminal = ghostty_vt.Terminal;
 const Screen = ghostty_vt.Screen;
 const Action = ghostty_vt.StreamAction;
 const apc = ghostty_vt.apc;
+const dcs = ghostty_vt.dcs;
 const osc = ghostty_vt.osc;
 const size_report = ghostty_vt.size_report;
 const kitty = ghostty_vt.kitty;
@@ -29,26 +31,31 @@ const csi = struct {
 
 pub const Handler = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     pty: *std.Io.Writer,
     vt_stream: *std.Io.Writer,
     terminal: *Terminal,
     apc_handler: apc.Handler,
+    dcs_handler: dcs.Handler,
 
     const default_cursor_style: Screen.CursorStyle = .block;
     const default_cursor_blink: bool = false;
 
     pub fn init(
         gpa: std.mem.Allocator,
+        io: std.Io,
         pty: *std.Io.Writer,
         vt_stream: *std.Io.Writer,
         terminal: *Terminal,
     ) Handler {
         return .{
             .gpa = gpa,
+            .io = io,
             .pty = pty,
             .vt_stream = vt_stream,
             .terminal = terminal,
             .apc_handler = .{},
+            .dcs_handler = .{},
         };
     }
 
@@ -155,7 +162,13 @@ pub const Handler = struct {
             .cursor_pos => {
                 self.terminal.setCursorPos(value.row, value.col);
 
-                try self.vt_stream.print("\x1b[{d};{d}H", .{ value.row, value.col });
+                try self.vt_stream.writeAll("\x1b[");
+                if (value.col != 1) {
+                    try self.vt_stream.print("{d};{d}", .{ value.row, value.col });
+                } else if (value.row != 1) {
+                    try self.vt_stream.print("{d}", .{value.row});
+                }
+                try self.vt_stream.writeByte('H');
             },
             .cursor_col => {
                 self.terminal.setCursorPos(self.terminal.screens.active.cursor.y + 1, value.value);
@@ -188,30 +201,9 @@ pub const Handler = struct {
                 try self.vt_stream.writeByte('e');
             },
             .cursor_style => {
-                const blink = switch (value) {
-                    .default => default_cursor_blink,
-                    .steady_block, .steady_bar, .steady_underline => false,
-                    .blinking_block, .blinking_bar, .blinking_underline => true,
-                };
-                const style: Screen.CursorStyle = switch (value) {
-                    .default => default_cursor_style,
-                    .blinking_block, .steady_block => .block,
-                    .blinking_bar, .steady_bar => .bar,
-                    .blinking_underline, .steady_underline => .underline,
-                };
-                self.terminal.modes.set(.cursor_blinking, blink);
-                self.terminal.screens.active.cursor.cursor_style = style;
+                self.terminal.setCursorStyle(value);
 
-                const style_val: u8 = switch (value) {
-                    .default => 0,
-                    .blinking_block => 1,
-                    .steady_block => 2,
-                    .blinking_underline => 3,
-                    .steady_underline => 4,
-                    .blinking_bar => 5,
-                    .steady_bar => 6,
-                };
-                try self.vt_stream.print("\x1b[{d} q", .{style_val});
+                try self.vt_stream.print("\x1b[{d} q", .{@intFromEnum(value)});
             },
             .erase_display_below => {
                 self.terminal.eraseDisplay(.below, value);
@@ -562,13 +554,13 @@ pub const Handler = struct {
             },
             .modify_key_format => {
                 self.terminal.flags.modify_other_keys_2 = switch (value) {
-                    .other_keys_numeric => true,
                     .legacy,
                     .cursor_keys,
                     .function_keys,
                     .other_keys_none,
                     .other_keys_numeric_except,
                     => false,
+                    .other_keys_numeric => true,
                 };
 
                 const format_val: u8 = switch (value) {
@@ -597,8 +589,6 @@ pub const Handler = struct {
             },
             .full_reset => {
                 self.terminal.fullReset();
-                self.terminal.modes.set(.cursor_blinking, default_cursor_blink);
-                self.terminal.screens.active.cursor.cursor_style = default_cursor_style;
 
                 try self.vt_stream.writeAll("\x1bc");
             },
@@ -701,7 +691,6 @@ pub const Handler = struct {
 
                         .query => |target| {
                             const c = self.terminal.colorForXterm(target) orelse continue;
-
                             switch (target) {
                                 .palette => |i| {
                                     try self.pty.print("\x1b]4;{d};", .{i});
@@ -800,40 +789,35 @@ pub const Handler = struct {
                 try self.vt_stream.writeAll("\x1b_");
             },
             .apc_put => {
-                self.apc_handler.feed(self.terminal.gpa(), value);
+                self.apc_handler.feed(self.gpa, value);
 
                 try self.vt_stream.writeByte(value);
             },
             .apc_put_slice => {
-                self.apc_handler.feedSlice(self.terminal.gpa(), value.bytes);
+                self.apc_handler.feedSlice(self.gpa, value.bytes);
 
                 try self.vt_stream.writeAll(value.bytes);
             },
             .apc_end => {
-                const io = self.terminal.io();
-                const alloc = self.terminal.gpa();
-                var cmd = self.apc_handler.end() orelse return;
-                defer cmd.deinit(alloc);
-
-                switch (cmd) {
-                    .kitty => |*kitty_cmd| {
-                        if (self.terminal.kittyGraphics(
-                            io,
-                            alloc,
-                            kitty_cmd,
-                        )) |resp| {
-                            try resp.encode(self.pty);
-                        }
+                var result = self.apc_handler.end() orelse return;
+                defer result.deinit(self.gpa);
+                switch (result) {
+                    .unknown => |*unknown| {
+                        _ = unknown;
+                    },
+                    .kitty => |*kitty_cmd| if (self.terminal.kittyGraphics(
+                        self.io,
+                        self.gpa,
+                        kitty_cmd,
+                    )) |resp| {
+                        try resp.encode(self.pty);
                     },
 
                     .glyph => |*glyph_req| {
-                        const resp = self.terminal.glyphProtocol(alloc, glyph_req);
-                        if (resp) |r| {
-                            try r.formatWire(self.pty);
+                        if (self.terminal.glyphProtocol(self.gpa, glyph_req)) |resp| {
+                            try resp.formatWire(self.pty);
                         }
                     },
-
-                    .unknown => {},
                 }
 
                 try self.vt_stream.writeAll("\x1b\\");
@@ -843,16 +827,12 @@ pub const Handler = struct {
             .bell => {
                 try self.vt_stream.writeByte(0x07);
             },
+            .show_desktop_notification => {
+                try self.vt_stream.print("\x1b]9;{s};{s}\x1b\\", .{ value.title, value.body });
+            },
             .device_attributes => {
                 const attrs: device_attributes.Attributes = .{};
-
                 try attrs.encode(value, self.pty);
-
-                // switch (value) {
-                //     .primary => try self.vt_stream.writeAll("\x1b[c"),
-                //     .secondary => try self.vt_stream.writeAll("\x1b[>c"),
-                //     .tertiary => try self.vt_stream.writeAll("\x1b[=c"),
-                // }
             },
             .device_status => {
                 switch (value.request) {
@@ -876,47 +856,27 @@ pub const Handler = struct {
                         });
                     },
 
-                    .color_scheme => {
-                        return;
-                    },
+                    .color_scheme => {},
 
                     .visibility => {
-                        const visibility: device_status.Visibility = if (self.terminal.flags.visible)
-                            .potentially_visible
-                        else
-                            .not_visible;
-                        try device_status.encodeVisibilityReport(self.pty, visibility);
+                        try device_status.encodeVisibilityReport(
+                            self.pty,
+                            if (self.terminal.flags.visible) .potentially_visible else .not_visible,
+                        );
                     },
                 }
-
-                // switch (value.request) {
-                //     .operating_status => try self.vt_stream.writeAll("\x1b[5n"),
-                //     .cursor_position => try self.vt_stream.writeAll("\x1b[6n"),
-                //     .color_scheme => {},
-                // }
             },
             .enquiry => {
-                // TODO(thiago): what does this do?
-                try self.vt_stream.writeByte(0x05);
+                // TODO(thiago): do we need this? ENQ (0x05)
             },
             .kitty_keyboard_query => {
                 try self.pty.print("\x1b[?{}u", .{
                     self.terminal.screens.active.kitty_keyboard.current().int(),
                 });
-
-                // try self.vt_stream.writeAll("\x1b[?u");
             },
             .request_mode => {
                 const report = self.terminal.modes.getReport(.fromMode(value.mode));
                 try report.encode(self.pty);
-
-                // const mode_int = @intFromEnum(value.mode);
-                // const mode_tag: modes.ModeTag = @bitCast(mode_int);
-                // if (mode_tag.ansi) {
-                //     try self.vt_stream.print("\x1b[{d}$p", .{mode_tag.value});
-                // } else {
-                //     try self.vt_stream.print("\x1b[?{d}$p", .{mode_tag.value});
-                // }
             },
             .request_mode_unknown => {
                 const report = self.terminal.modes.getReport(.{
@@ -924,12 +884,6 @@ pub const Handler = struct {
                     .ansi = value.ansi,
                 });
                 try report.encode(self.pty);
-
-                // if (value.ansi) {
-                //     try self.vt_stream.print("\x1b[{d}$p", .{value.mode});
-                // } else {
-                //     try self.vt_stream.print("\x1b[?{d}$p", .{value.mode});
-                // }
             },
             .size_report => {
                 switch (value) {
@@ -958,13 +912,6 @@ pub const Handler = struct {
                         );
                     },
                 }
-
-                // switch (value) {
-                //     .csi_14_t => try self.vt_stream.writeAll("\x1b[14t"),
-                //     .csi_16_t => try self.vt_stream.writeAll("\x1b[16t"),
-                //     .csi_18_t => try self.vt_stream.writeAll("\x1b[18t"),
-                //     .csi_21_t => try self.vt_stream.writeAll("\x1b[21t"),
-                // }
             },
             .window_title => {
                 // Prevent DoS attacks by limiting title length.
@@ -979,7 +926,7 @@ pub const Handler = struct {
 
                 try self.terminal.setTitle(title);
 
-                try self.vt_stream.print("\x1b]0;{s}\x1b\\", .{value.title});
+                try self.vt_stream.print("\x1b]0;{s}\x1b\\", .{title});
             },
             .report_pwd => {
                 // Prevent DoS attacks by limiting url length. Headroom for
@@ -997,38 +944,7 @@ pub const Handler = struct {
                 // getPwd() and are responsible for decoding any URI scheme.
                 try self.terminal.setPwd(url);
 
-                // try self.vt_stream.print("\x1b]7;file://{s}\x1b\\", .{value.url});
-            },
-            .xtversion => {
-                const version = "zmy 0.0.1";
-                try self.pty.print("\x1BP>|{s}\x1B\\", .{version});
-
-                // try self.vt_stream.writeAll("\x1b[>q");
-            },
-            .clipboard_contents => {
-                try self.vt_stream.print("\x1b]52;{c};{s}\x1b\\", .{ value.kind, value.data });
-            },
-
-            // No supported DCS commands have any terminal-modifying effects,
-            // but they may in the future. For now we just ignore it.
-            .dcs_hook => {
-                try self.vt_stream.writeAll("\x1bP");
-                try self.vt_stream.writeAll(value.intermediates);
-                for (value.params) |p| {
-                    try self.vt_stream.print("{d};", .{p});
-                }
-                try self.vt_stream.writeByte(value.final);
-            },
-            .dcs_put => {
-                try self.vt_stream.writeByte(value);
-            },
-            .dcs_unhook => {
-                try self.vt_stream.writeAll("\x1b\\");
-            },
-
-            // Have no terminal-modifying effect
-            .show_desktop_notification => {
-                try self.vt_stream.print("\x1b]9;{s};{s}\x1b\\", .{ value.title, value.body });
+                try self.vt_stream.print("\x1b]7;file://{s}\x1b\\", .{url});
             },
             .progress_report => {
                 // Re-emit the ConEmu OSC 9;4 progress report. The state is
@@ -1040,6 +956,37 @@ pub const Handler = struct {
                 }
                 try self.vt_stream.writeAll("\x1b\\");
             },
+            .xtversion => {
+                const version = "zmy 0.0.1";
+                try self.pty.print("\x1BP>|{s}\x1B\\", .{version});
+            },
+            .clipboard_contents => {
+                // Read requests are deliberately not forwarded; see the effect docs.
+                if (value.data.len == 1 and value.data[0] == '?') return;
+
+                try self.vt_stream.print("\x1b]52;{c};{s}\x1b\\", .{ value.kind, value.data });
+            },
+
+            .dcs_hook => {
+                var cmd = self.dcs_handler.hook(
+                    self.gpa,
+                    value,
+                ) orelse return;
+                defer cmd.deinit();
+                try self.dcsCommand(&cmd);
+            },
+            .dcs_put => {
+                var cmd = self.dcs_handler.put(value) orelse return;
+                defer cmd.deinit();
+                try self.dcsCommand(&cmd);
+            },
+            .dcs_unhook => {
+                var cmd = self.dcs_handler.unhook() orelse return;
+                defer cmd.deinit();
+                try self.dcsCommand(&cmd);
+            },
+
+            // Have no terminal-modifying effect
             .title_push => {
                 try self.vt_stream.print("\x1b[22;0;{d}t", .{value});
             },
@@ -1144,6 +1091,7 @@ pub const Handler = struct {
             .report_color_scheme,
             => {},
             .report_visibility => {
+                // TODO(thiago): do not forward this to self.vt_stream
                 if (enabled) {
                     const visibility: device_status.Visibility = if (self.terminal.flags.visible)
                         .potentially_visible
@@ -1152,6 +1100,25 @@ pub const Handler = struct {
                     try device_status.encodeVisibilityReport(self.pty, visibility);
                 }
             },
+        }
+    }
+
+    fn dcsCommand(self: *Handler, cmd: *dcs.Command) !void {
+        switch (cmd.*) {
+            .decrqss => |request| {
+                var response: [dcs.Command.DECRQSS.max_response_bytes]u8 = undefined;
+                const encoded = try request.encode(self.terminal, &response);
+                try self.pty.writeAll(encoded);
+            },
+
+            .xtgettcap => |*gettcap| {
+                const map = comptime terminfo.zmy.xtgettcapMap();
+                while (gettcap.next()) |key| {
+                    try self.pty.writeAll(map.get(key) orelse continue);
+                }
+            },
+
+            .tmux => {},
         }
     }
 };
