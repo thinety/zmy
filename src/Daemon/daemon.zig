@@ -1,8 +1,11 @@
 const std = @import("std");
+const ghostty = @import("ghostty-vt");
 
 const PtyEvent = @import("pty.zig").Event;
 const ClientEvent = @import("client.zig").Event;
 const handleClient = @import("client.zig").handleClient;
+const StreamHandler = @import("../stream.zig").Handler;
+const formatTerminal = @import("../formatter.zig").formatTerminal;
 
 const log = std.log.scoped(.zmy_daemon_daemon);
 
@@ -61,6 +64,23 @@ pub fn mainLoop(
         }
     }
 
+    var pty_buffer: std.Io.Writer.Allocating = .init(gpa);
+    defer pty_buffer.deinit();
+
+    var vt_stream_buffer: std.Io.Writer.Allocating = .init(gpa);
+    defer vt_stream_buffer.deinit();
+
+    var term = try ghostty.Terminal.init(io, gpa, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(gpa);
+    var vt_stream = ghostty.Stream(StreamHandler).init(.{
+        .handler = .init(gpa, &pty_buffer.writer, &vt_stream_buffer.writer, &term),
+        .allocator = gpa,
+    });
+    defer vt_stream.deinit();
+
     while (true) {
         var event = try event_queue.getOne(io);
         errdefer event.deinit(gpa, io);
@@ -69,17 +89,35 @@ pub fn mainLoop(
                 log.info("Event.new_client: stream={}", .{stream.socket.handle});
 
                 const client = try gpa.create(Client);
-                errdefer gpa.destroy(client);
+                {
+                    errdefer gpa.destroy(client);
 
-                client.* = .{
-                    .stream = stream,
-                    .queue = .init(&client.queue_buffer),
-                    .task = try io.concurrent(
-                        handleClient,
-                        .{ gpa, io, stream, event_queue, &client.queue },
-                    ),
-                };
-                clients.append(&client.node);
+                    client.* = .{
+                        .stream = stream,
+                        .queue = .init(&client.queue_buffer),
+                        .task = try io.concurrent(
+                            handleClient,
+                            .{ gpa, io, stream, event_queue, &client.queue },
+                        ),
+                    };
+                    clients.append(&client.node);
+                }
+
+                var allocating: std.Io.Writer.Allocating = .init(gpa);
+                defer allocating.deinit();
+
+                try formatTerminal(&term, &allocating.writer);
+
+                const output = allocating.writer.buffered();
+                if (output.len > 0) {
+                    const client_data = try gpa.dupe(u8, output);
+                    errdefer gpa.free(client_data);
+
+                    try client.queue.putOne(
+                        io,
+                        .{ .data = client_data },
+                    );
+                }
             },
             .pty_input => |data| {
                 log.info("Event.pty_input: data={x}", .{data});
@@ -87,28 +125,44 @@ pub fn mainLoop(
             },
             .pty_output => |data| {
                 log.info("Event.pty_output: data={x}", .{data});
-                var it = clients.first;
-                while (it) |node| {
-                    const client: *Client = @fieldParentPtr("node", node);
-                    it = node.next;
 
-                    // TODO: use reference counting instead of copying data
-                    const client_data = try gpa.dupe(u8, data);
-                    errdefer gpa.free(client_data);
-
-                    client.queue.putOne(io, .{ .data = client_data }) catch |err| switch (err) {
-                        error.Closed => {
-                            log.info("client disconnected: stream={}", .{client.stream.socket.handle});
-
-                            clients.remove(&client.node);
-                            client.deinit(gpa, io);
-                            gpa.destroy(client);
-                            gpa.free(client_data);
-                        },
-                        error.Canceled => |e| return e,
-                    };
-                }
+                vt_stream.nextSlice(data);
                 gpa.free(data);
+
+                if (pty_buffer.written().len > 0) {
+                    defer pty_buffer.clearRetainingCapacity();
+
+                    const pty_data = try gpa.dupe(u8, pty_buffer.written());
+                    errdefer gpa.free(pty_data);
+
+                    try pty_input_queue.putOne(io, .{ .data = pty_data });
+                }
+
+                if (vt_stream_buffer.written().len > 0) {
+                    defer vt_stream_buffer.clearRetainingCapacity();
+
+                    var it = clients.first;
+                    while (it) |node| {
+                        const client: *Client = @fieldParentPtr("node", node);
+                        it = node.next;
+
+                        // TODO: use reference counting instead of copying data
+                        const client_data = try gpa.dupe(u8, vt_stream_buffer.written());
+                        errdefer gpa.free(client_data);
+
+                        client.queue.putOne(io, .{ .data = client_data }) catch |err| switch (err) {
+                            error.Closed => {
+                                log.info("client disconnected: stream={}", .{client.stream.socket.handle});
+
+                                clients.remove(&client.node);
+                                client.deinit(gpa, io);
+                                gpa.destroy(client);
+                                gpa.free(client_data);
+                            },
+                            error.Canceled => |e| return e,
+                        };
+                    }
+                }
             },
         }
     }
