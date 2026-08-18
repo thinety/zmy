@@ -23,6 +23,64 @@ pub fn deinit(self: *Client, io: std.Io) void {
 }
 
 pub fn loop(self: *Client, gpa: std.mem.Allocator, io: std.Io) !void {
+    const tty_fd = std.c.STDIN_FILENO;
+
+    // get initial terminal configuration
+    var termios: std.c.termios = undefined;
+    switch (std.c.errno(std.c.tcgetattr(tty_fd, &termios))) {
+        .SUCCESS => {},
+        else => |err| {
+            log.err("tcgetattr({}) failed: {t}", .{ tty_fd, err });
+            return error.TcgetattrError;
+        },
+    }
+
+    // set raw mode
+    {
+        var raw_termios = termios;
+
+        raw_termios.iflag.IGNBRK = false;
+        raw_termios.iflag.BRKINT = false;
+        raw_termios.iflag.PARMRK = false;
+        raw_termios.iflag.ISTRIP = false;
+        raw_termios.iflag.INLCR = false;
+        raw_termios.iflag.IGNCR = false;
+        raw_termios.iflag.ICRNL = false;
+        raw_termios.iflag.IXON = false;
+
+        raw_termios.oflag.OPOST = false;
+
+        raw_termios.lflag.ECHO = false;
+        raw_termios.lflag.ECHONL = false;
+        raw_termios.lflag.ICANON = false;
+        raw_termios.lflag.ISIG = false;
+        raw_termios.lflag.IEXTEN = false;
+
+        raw_termios.cflag.CSIZE = .CS8;
+        raw_termios.cflag.PARENB = false;
+
+        raw_termios.cc[@intFromEnum(std.c.V.MIN)] = 1;
+        raw_termios.cc[@intFromEnum(std.c.V.TIME)] = 0;
+
+        switch (std.c.errno(std.c.tcsetattr(tty_fd, .FLUSH, &raw_termios))) {
+            .SUCCESS => {},
+            else => |err| {
+                log.err("tcsetattr({}, TCSAFLUSH) failed: {t}", .{ tty_fd, err });
+                return error.TcsetattrError;
+            },
+        }
+    }
+
+    // restore previous terminal mode
+    defer {
+        switch (std.c.errno(std.c.tcsetattr(tty_fd, .FLUSH, &termios))) {
+            .SUCCESS => {},
+            else => |err| {
+                log.err("tcsetattr({}, TCSAFLUSH) failed: {t}", .{ tty_fd, err });
+            },
+        }
+    }
+
     try try async.race(io, .{
         .{ readStream, .{ gpa, io, self.stream } },
         .{ writeStream, .{ io, self.stream } },
@@ -94,7 +152,9 @@ fn writeStream_(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
 ) !void {
-    var buffer: [4096]u8 = undefined;
+    // doesn't need to be big: in practice, we read byte by byte because
+    // of setting the terminal to raw mode above
+    var buffer: [256]u8 = undefined;
     while (true) {
         var n: usize = 0;
         while (n == 0) {
