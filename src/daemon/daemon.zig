@@ -147,9 +147,16 @@ fn mainLoop(
     });
     defer term.deinit(gpa);
 
+    var vt_stream_handler: stream_mod.Handler = .init(
+        gpa,
+        io,
+        &pty_buffer.writer,
+        &vt_stream_buffer.writer,
+        &term,
+    );
     var vt_stream = ghostty.Stream(stream_mod.Handler).init(.{
-        .handler = .init(gpa, io, &pty_buffer.writer, &vt_stream_buffer.writer, &term),
         .allocator = gpa,
+        .handler = vt_stream_handler,
     });
     defer vt_stream.deinit();
 
@@ -198,7 +205,15 @@ fn mainLoop(
                         const first_winsize = client.winsize == null;
                         client.winsize = winsize;
 
-                        try doResize(gpa, clients, &term, pty);
+                        try doResize(clients, &vt_stream_handler, pty);
+                        if (pty_buffer.written().len > 0) {
+                            defer pty_buffer.clearRetainingCapacity();
+
+                            const ptyin_data = try gpa.dupe(u8, pty_buffer.written());
+                            errdefer gpa.free(ptyin_data);
+
+                            try ptyin_queue.putOne(io, ptyin_data);
+                        }
 
                         if (first_winsize) {
                             var allocating: std.Io.Writer.Allocating = .init(gpa);
@@ -233,7 +248,15 @@ fn mainLoop(
                 client.deinit(gpa, io);
                 gpa.destroy(client);
 
-                try doResize(gpa, clients, &term, pty);
+                try doResize(clients, &vt_stream_handler, pty);
+                if (pty_buffer.written().len > 0) {
+                    defer pty_buffer.clearRetainingCapacity();
+
+                    const ptyin_data = try gpa.dupe(u8, pty_buffer.written());
+                    errdefer gpa.free(ptyin_data);
+
+                    try ptyin_queue.putOne(io, ptyin_data);
+                }
             },
             .ptyout => |data| {
                 defer gpa.free(data);
@@ -285,9 +308,8 @@ const default_winsize: ipc.Winsize = .{
 };
 
 fn doResize(
-    gpa: std.mem.Allocator,
     clients: std.DoublyLinkedList,
-    term: *ghostty.Terminal,
+    vt_stream_handler: *stream_mod.Handler,
     pty: std.Io.File,
 ) !void {
     var optional_final_winsize: ?ipc.Winsize = null;
@@ -310,7 +332,7 @@ fn doResize(
 
     const final_winsize = optional_final_winsize orelse default_winsize;
 
-    try term.resize(gpa, .{
+    try vt_stream_handler.resize(.{
         .cols = final_winsize.col,
         .rows = final_winsize.row,
         .cell_size_px = .{

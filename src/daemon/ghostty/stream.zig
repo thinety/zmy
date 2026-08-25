@@ -63,6 +63,23 @@ pub const Handler = struct {
         self.apc_handler.deinit();
     }
 
+    pub fn resize(self: *Handler, value: Terminal.Resize) !void {
+        try self.terminal.resize(self.gpa, value);
+
+        // Mode 2048 reports require complete, current cell pixel geometry.
+        const cell_size = value.cell_size_px orelse return;
+
+        // If we have no in-band size reports enabled then do nothing.
+        if (!self.terminal.modes.get(.in_band_size_reports)) return;
+
+        try size_report.encode(self.pty, .mode_2048, .{
+            .rows = value.rows,
+            .columns = value.cols,
+            .cell_width = cell_size.width,
+            .cell_height = cell_size.height,
+        });
+    }
+
     pub fn vt(
         self: *Handler,
         comptime action: Action.Tag,
@@ -341,48 +358,16 @@ pub const Handler = struct {
             },
             .set_mode => {
                 try self.setMode(value.mode, true);
-
-                const mode_int = @intFromEnum(value.mode);
-                const mode_tag: modes.ModeTag = @bitCast(mode_int);
-                if (mode_tag.ansi) {
-                    try self.vt_stream.print("\x1b[{d}h", .{mode_tag.value});
-                } else {
-                    try self.vt_stream.print("\x1b[?{d}h", .{mode_tag.value});
-                }
             },
             .reset_mode => {
                 try self.setMode(value.mode, false);
-
-                const mode_int = @intFromEnum(value.mode);
-                const mode_tag: modes.ModeTag = @bitCast(mode_int);
-                if (mode_tag.ansi) {
-                    try self.vt_stream.print("\x1b[{d}l", .{mode_tag.value});
-                } else {
-                    try self.vt_stream.print("\x1b[?{d}l", .{mode_tag.value});
-                }
             },
             .save_mode => {
                 self.terminal.modes.save(value.mode);
-
-                const mode_int = @intFromEnum(value.mode);
-                const mode_tag: modes.ModeTag = @bitCast(mode_int);
-                if (mode_tag.ansi) {
-                    try self.vt_stream.print("\x1b[{d}$s", .{mode_tag.value});
-                } else {
-                    try self.vt_stream.print("\x1b[?{d}$s", .{mode_tag.value});
-                }
             },
             .restore_mode => {
                 const v = self.terminal.modes.restore(value.mode);
                 try self.setMode(value.mode, v);
-
-                const mode_int = @intFromEnum(value.mode);
-                const mode_tag: modes.ModeTag = @bitCast(mode_int);
-                if (mode_tag.ansi) {
-                    try self.vt_stream.print("\x1b[{d}$r", .{mode_tag.value});
-                } else {
-                    try self.vt_stream.print("\x1b[?{d}$r", .{mode_tag.value});
-                }
             },
             .top_and_bottom_margin => {
                 self.terminal.setTopAndBottomMargin(value.top_left, value.bottom_right);
@@ -893,23 +878,18 @@ pub const Handler = struct {
                     },
 
                     .csi_14_t, .csi_16_t, .csi_18_t => {
-                        const s: size_report.Size = .{
-                            .rows = self.terminal.rows,
-                            .columns = self.terminal.cols,
-                            .cell_width = self.terminal.width_px / self.terminal.cols,
-                            .cell_height = self.terminal.height_px / self.terminal.rows,
-                        };
                         const report_style: size_report.Style = switch (value) {
                             .csi_14_t => .csi_14_t,
                             .csi_16_t => .csi_16_t,
                             .csi_18_t => .csi_18_t,
                             .csi_21_t => unreachable,
                         };
-                        try size_report.encode(
-                            self.pty,
-                            report_style,
-                            s,
-                        );
+                        try size_report.encode(self.pty, report_style, .{
+                            .rows = self.terminal.rows,
+                            .columns = self.terminal.cols,
+                            .cell_width = self.terminal.width_px / self.terminal.cols,
+                            .cell_height = self.terminal.height_px / self.terminal.rows,
+                        });
                     },
                 }
             },
@@ -1000,41 +980,85 @@ pub const Handler = struct {
         // Set the mode on the terminal
         self.terminal.modes.set(mode, enabled);
 
-        // Some modes require additional processing
+        // Some modes require additional processing and/or forwarding
         switch (mode) {
             .autorepeat,
             .reverse_colors,
-            => {},
-
-            .origin => self.terminal.setCursorPos(1, 1),
-
-            .enable_left_and_right_margin => if (!enabled) {
-                self.terminal.scrolling_region.left = 0;
-                self.terminal.scrolling_region.right = self.terminal.cols - 1;
+            => {
+                try self.forwardMode(mode, enabled);
             },
 
-            .alt_screen_legacy => try self.terminal.switchScreenMode(.@"47", enabled),
-            .alt_screen => try self.terminal.switchScreenMode(.@"1047", enabled),
-            .alt_screen_save_cursor_clear_enter => try self.terminal.switchScreenMode(.@"1049", enabled),
+            .origin => {
+                self.terminal.setCursorPos(1, 1);
 
-            .save_cursor => if (enabled) {
-                self.terminal.saveCursor();
-            } else {
-                self.terminal.restoreCursor();
+                try self.forwardMode(mode, enabled);
             },
 
-            .enable_mode_3 => {},
+            .enable_left_and_right_margin => {
+                if (!enabled) {
+                    self.terminal.scrolling_region.left = 0;
+                    self.terminal.scrolling_region.right = self.terminal.cols - 1;
+                }
 
-            .@"132_column" => try self.terminal.deccolm(
-                self.terminal.screens.active.alloc,
-                if (enabled) .@"132_cols" else .@"80_cols",
-            ),
+                try self.forwardMode(mode, enabled);
+            },
+
+            .alt_screen_legacy => {
+                try self.terminal.switchScreenMode(.@"47", enabled);
+
+                try self.forwardMode(mode, enabled);
+            },
+            .alt_screen => {
+                try self.terminal.switchScreenMode(.@"1047", enabled);
+
+                try self.forwardMode(mode, enabled);
+            },
+            .alt_screen_save_cursor_clear_enter => {
+                try self.terminal.switchScreenMode(.@"1049", enabled);
+
+                try self.forwardMode(mode, enabled);
+            },
+
+            .save_cursor => {
+                if (enabled) {
+                    self.terminal.saveCursor();
+                } else {
+                    self.terminal.restoreCursor();
+                }
+
+                try self.forwardMode(mode, enabled);
+            },
+
+            .enable_mode_3 => {
+                try self.forwardMode(mode, enabled);
+            },
+
+            .@"132_column" => {
+                try self.terminal.deccolm(
+                    self.terminal.screens.active.alloc,
+                    if (enabled) .@"132_cols" else .@"80_cols",
+                );
+
+                try self.forwardMode(mode, enabled);
+            },
 
             .synchronized_output,
             .linefeed,
-            .in_band_size_reports,
             .focus_event,
-            => {},
+            => {
+                try self.forwardMode(mode, enabled);
+            },
+
+            .in_band_size_reports => {
+                if (enabled) {
+                    try size_report.encode(self.pty, .mode_2048, .{
+                        .rows = self.terminal.rows,
+                        .columns = self.terminal.cols,
+                        .cell_width = self.terminal.width_px / self.terminal.cols,
+                        .cell_height = self.terminal.height_px / self.terminal.rows,
+                    });
+                }
+            },
 
             .mouse_event_x10 => {
                 if (enabled) {
@@ -1042,6 +1066,8 @@ pub const Handler = struct {
                 } else {
                     self.terminal.flags.mouse_event = .none;
                 }
+
+                try self.forwardMode(mode, enabled);
             },
             .mouse_event_normal => {
                 if (enabled) {
@@ -1049,6 +1075,8 @@ pub const Handler = struct {
                 } else {
                     self.terminal.flags.mouse_event = .none;
                 }
+
+                try self.forwardMode(mode, enabled);
             },
             .mouse_event_button => {
                 if (enabled) {
@@ -1056,6 +1084,8 @@ pub const Handler = struct {
                 } else {
                     self.terminal.flags.mouse_event = .none;
                 }
+
+                try self.forwardMode(mode, enabled);
             },
             .mouse_event_any => {
                 if (enabled) {
@@ -1063,12 +1093,30 @@ pub const Handler = struct {
                 } else {
                     self.terminal.flags.mouse_event = .none;
                 }
+
+                try self.forwardMode(mode, enabled);
             },
 
-            .mouse_format_utf8 => self.terminal.flags.mouse_format = if (enabled) .utf8 else .x10,
-            .mouse_format_sgr => self.terminal.flags.mouse_format = if (enabled) .sgr else .x10,
-            .mouse_format_urxvt => self.terminal.flags.mouse_format = if (enabled) .urxvt else .x10,
-            .mouse_format_sgr_pixels => self.terminal.flags.mouse_format = if (enabled) .sgr_pixels else .x10,
+            .mouse_format_utf8 => {
+                self.terminal.flags.mouse_format = if (enabled) .utf8 else .x10;
+
+                try self.forwardMode(mode, enabled);
+            },
+            .mouse_format_sgr => {
+                self.terminal.flags.mouse_format = if (enabled) .sgr else .x10;
+
+                try self.forwardMode(mode, enabled);
+            },
+            .mouse_format_urxvt => {
+                self.terminal.flags.mouse_format = if (enabled) .urxvt else .x10;
+
+                try self.forwardMode(mode, enabled);
+            },
+            .mouse_format_sgr_pixels => {
+                self.terminal.flags.mouse_format = if (enabled) .sgr_pixels else .x10;
+
+                try self.forwardMode(mode, enabled);
+            },
 
             .disable_keyboard,
             .insert,
@@ -1089,9 +1137,10 @@ pub const Handler = struct {
             .bracketed_paste,
             .grapheme_cluster,
             .report_color_scheme,
-            => {},
+            => {
+                try self.forwardMode(mode, enabled);
+            },
             .report_visibility => {
-                // TODO(thiago): do not forward this to self.vt_stream
                 if (enabled) {
                     const visibility: device_status.Visibility = if (self.terminal.flags.visible)
                         .potentially_visible
@@ -1099,7 +1148,20 @@ pub const Handler = struct {
                         .not_visible;
                     try device_status.encodeVisibilityReport(self.pty, visibility);
                 }
+
+                try self.forwardMode(mode, enabled);
             },
+        }
+    }
+
+    fn forwardMode(self: *Handler, mode: modes.Mode, enabled: bool) !void {
+        const mode_int = @intFromEnum(mode);
+        const mode_tag: modes.ModeTag = @bitCast(mode_int);
+        const final_byte: u8 = if (enabled) 'h' else 'l';
+        if (mode_tag.ansi) {
+            try self.vt_stream.print("\x1b[{d}{c}", .{ mode_tag.value, final_byte });
+        } else {
+            try self.vt_stream.print("\x1b[?{d}{c}", .{ mode_tag.value, final_byte });
         }
     }
 
