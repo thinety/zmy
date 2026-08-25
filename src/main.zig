@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const Client = @import("Client.zig");
-const Daemon = @import("Daemon.zig");
+const client = @import("client/client.zig");
+const daemon = @import("daemon/daemon.zig");
 
 pub const std_options: std.Options = .{
     // TODO: FIXME: submit patch to zig (errno=111 below)
@@ -87,10 +87,7 @@ fn runDaemon(
 
     const address: std.Io.net.UnixAddress = try .init(path);
 
-    var daemon = try Daemon.init(io, shell, address);
-    defer daemon.deinit(io);
-
-    try daemon.loop(gpa, io);
+    try daemon.run(gpa, io, shell, address);
 }
 
 fn runAttach(
@@ -104,27 +101,22 @@ fn runAttach(
 
     const address: std.Io.net.UnixAddress = try .init(path);
 
-    var client = client: {
-        var retries: u32 = 0;
-        while (true) {
-            if (Client.init(io, address)) |client| {
-                break :client client;
-            } else |err| switch (err) {
-                error.FileNotFound,
-                error.Unexpected, // errno=111 ECONNREFUSED
-                => |e| if (retries == 2) return e,
-                else => |e| return e,
-            }
-            if (retries == 0) {
-                try spawnDaemon(rundir, session_name);
-            }
-            try io.sleep(.fromMilliseconds(50), .real);
-            retries += 1;
-        }
-    };
-    defer client.deinit(io);
-
-    try client.loop(gpa, io);
+    var retries: u32 = 0;
+    while (true) {
+        client.run(gpa, io, address) catch |err| switch (err) {
+            error.FileNotFound,
+            error.Unexpected, // errno=111 ECONNREFUSED
+            => |e| {
+                if (retries == 2) return e;
+                if (retries == 0) try spawnDaemon(rundir, session_name);
+                try io.sleep(.fromMilliseconds(50), .real);
+                retries += 1;
+                continue;
+            },
+            else => |e| return e,
+        };
+        break;
+    }
 }
 
 fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
@@ -135,7 +127,7 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
         .SUCCESS => {},
         else => |err| {
             log.err("fork() failed: {t}", .{err});
-            return error.ForkError;
+            return error.Fork;
         },
     }
     if (pid > 0) return;
@@ -254,7 +246,7 @@ fn closeStderrIfTty() !void {
         .SUCCESS => {},
         else => |err| {
             log.err("open(/dev/null, O_RDWR) failed: {t}", .{err});
-            return error.OpenError;
+            return error.Open;
         },
     }
 
@@ -262,7 +254,7 @@ fn closeStderrIfTty() !void {
         .SUCCESS => {},
         else => |err| {
             log.err("dup2({}, {}) failed: {t}", .{ dev_null, std.c.STDERR_FILENO, err });
-            return error.Dup2Error;
+            return error.Dup2;
         },
     }
 
@@ -270,7 +262,7 @@ fn closeStderrIfTty() !void {
         .SUCCESS => {},
         else => |err| {
             log.err("close({}) failed: {t}", .{ dev_null, err });
-            return error.CloseError;
+            return error.Close;
         },
     }
 }

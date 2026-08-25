@@ -20,8 +20,6 @@ pub fn formatTerminal(
     terminal: *const Terminal,
     writer: *std.Io.Writer,
 ) std.Io.Writer.Error!void {
-    try writer.writeAll("\x1bc");
-
     // Emit terminal modes that differ from defaults. We probably have
     // some modes we want to emit before and some after, but for now for
     // simplicity we just emit them all before. If we make this more complex

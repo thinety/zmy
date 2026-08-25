@@ -944,7 +944,7 @@ pub const Handler = struct {
                 // getPwd() and are responsible for decoding any URI scheme.
                 try self.terminal.setPwd(url);
 
-                try self.vt_stream.print("\x1b]7;file://{s}\x1b\\", .{url});
+                try self.vt_stream.print("\x1b]7;{s}\x1b\\", .{url});
             },
             .progress_report => {
                 // Re-emit the ConEmu OSC 9;4 progress report. The state is
