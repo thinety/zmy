@@ -9,17 +9,17 @@ pub const Winsize = struct {
 
 pub const ClientMessage = union(enum(u8)) {
     resize: Winsize,
-    data: [1]u8,
+    data: []u8,
 
     pub const Tag = @typeInfo(ClientMessage).@"union".tag_type.?;
 
-    pub fn deinit(self: *ClientMessage) void {
+    pub fn deinit(self: *ClientMessage, gpa: std.mem.Allocator) void {
         switch (self.*) {
             .resize => |winsize| {
                 _ = winsize;
             },
             .data => |data| {
-                _ = data;
+                gpa.free(data);
             },
         }
         self.* = undefined;
@@ -35,12 +35,13 @@ pub const ClientMessage = union(enum(u8)) {
                 try writer.writeInt(u16, winsize.ypixel, .little);
             },
             .data => |data| {
-                try writer.writeAll(&data);
+                try writer.writeInt(usize, data.len, .little);
+                try writer.writeAll(data);
             },
         }
     }
 
-    pub fn deserialize(reader: *std.Io.Reader) !ClientMessage {
+    pub fn deserialize(gpa: std.mem.Allocator, reader: *std.Io.Reader) !ClientMessage {
         const tag = try reader.takeEnum(Tag, .little);
         switch (tag) {
             .resize => {
@@ -56,8 +57,14 @@ pub const ClientMessage = union(enum(u8)) {
                 } };
             },
             .data => {
-                const data = try reader.takeArray(1);
-                return .{ .data = data.* };
+                const len = try reader.takeInt(usize, .little);
+
+                const data = try gpa.alloc(u8, len);
+                errdefer gpa.free(data);
+
+                try reader.readSliceAll(data);
+
+                return .{ .data = data };
             },
         }
     }

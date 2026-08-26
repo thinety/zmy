@@ -9,7 +9,7 @@ const log = std.log.scoped(.zmy_client);
 pub const Event = union(enum) {
     resize: ipc.Winsize,
     daemon_message: ipc.DaemonMessage,
-    stdin: [1]u8,
+    stdin: []u8,
 
     fn deinit(self: *Event, gpa: std.mem.Allocator) void {
         switch (self.*) {
@@ -20,7 +20,7 @@ pub const Event = union(enum) {
                 message.deinit(gpa);
             },
             .stdin => |data| {
-                _ = data;
+                gpa.free(data);
             },
         }
         self.* = undefined;
@@ -139,15 +139,15 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, address: std.Io.net.UnixAddress) 
         message_queue.close(io);
         while (true) {
             var message = message_queue.getOne(io) catch break;
-            message.deinit();
+            message.deinit(gpa);
         }
     }
 
     try try async.race(io, .{
-        .{ stdio.readStdin, .{ io, &event_queue } },
+        .{ stdio.readStdin, .{ gpa, io, &event_queue } },
         .{ stdio.writeStdout, .{ gpa, io, &stdout_queue } },
         .{ socket.readSocket, .{ gpa, io, stream, &event_queue } },
-        .{ socket.writeSocket, .{ io, &message_queue, stream } },
+        .{ socket.writeSocket, .{ gpa, io, &message_queue, stream } },
         .{ readSignals, .{ io, signals, &event_queue } },
         .{ mainLoop, .{ gpa, io, &event_queue, &stdout_queue, &message_queue } },
     });
@@ -222,7 +222,12 @@ fn mainLoop(
                 }
             },
             .stdin => |data| {
-                log.info("Event.stdin: data={b64}", .{&data});
+                errdefer gpa.free(data);
+                log.info("Event.stdin: data.len={} data={b64}{s}", .{
+                    data.len,
+                    data[0..@min(data.len, 48)],
+                    if (data.len > 48) "..." else "",
+                });
 
                 const message: ipc.ClientMessage = .{ .data = data };
                 try message_queue.putOne(io, message);

@@ -14,7 +14,7 @@ pub fn handleClient(
     event_queue: *std.Io.Queue(daemon.Event),
 ) void {
     async.race(io, .{
-        .{ readSocket, .{ io, stream, event_queue, client } },
+        .{ readSocket, .{ gpa, io, stream, event_queue, client } },
         .{ writeSocket, .{ gpa, io, message_queue, stream } },
     }) catch |err| switch (err) {
         error.Canceled => {},
@@ -35,6 +35,7 @@ pub fn handleClient(
 }
 
 fn readSocket(
+    gpa: std.mem.Allocator,
     io: std.Io,
     stream: std.Io.net.Stream,
     event_queue: *std.Io.Queue(daemon.Event),
@@ -45,12 +46,12 @@ fn readSocket(
     const reader = &stream_reader.interface;
 
     while (true) {
-        var message = ipc.ClientMessage.deserialize(reader) catch |err| switch (err) {
+        var message = ipc.ClientMessage.deserialize(gpa, reader) catch |err| switch (err) {
             error.EndOfStream => break,
             error.ReadFailed => return stream_reader.err.?,
             else => |e| return e,
         };
-        errdefer message.deinit();
+        errdefer message.deinit(gpa);
 
         const event: daemon.Event = .{ .client_message = .{
             .client = client,

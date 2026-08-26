@@ -25,7 +25,7 @@ pub const Event = union(enum) {
                 stream.close(io);
             },
             .client_message => |*client_message| {
-                client_message.message.deinit();
+                client_message.message.deinit(gpa);
             },
             .client_disconnected => |client_ptr| {
                 _ = client_ptr;
@@ -231,12 +231,14 @@ fn mainLoop(
                         }
                     },
                     .data => |data| {
-                        log.info("ClientMessage.data: data={b64}", .{&data});
+                        errdefer gpa.free(data);
+                        log.info("ClientMessage.data: data.len={} data={b64}{s}", .{
+                            data.len,
+                            data[0..@min(data.len, 48)],
+                            if (data.len > 48) "..." else "",
+                        });
 
-                        const ptyin_data = try gpa.dupe(u8, &data);
-                        errdefer gpa.free(ptyin_data);
-
-                        try ptyin_queue.putOne(io, ptyin_data);
+                        try ptyin_queue.putOne(io, data);
                     },
                 }
             },
