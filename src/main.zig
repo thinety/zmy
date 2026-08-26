@@ -4,7 +4,7 @@ const client = @import("client/client.zig");
 const daemon = @import("daemon/daemon.zig");
 
 pub const std_options: std.Options = .{
-    // TODO: FIXME: submit patch to zig (errno=111 below)
+    // TODO(thiago): FIXME: submit patch to zig (errno=111 below)
     .unexpected_error_tracing = false,
 };
 const log = std.log.scoped(.zmy);

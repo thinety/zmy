@@ -211,7 +211,11 @@ fn mainLoop(
                 switch (message) {
                     .data => |data| {
                         errdefer gpa.free(data);
-                        log.info("DaemonMessage.data: data={b64}", .{data});
+                        log.info("DaemonMessage.data: data.len={} data={b64}{s}", .{
+                            data.len,
+                            data[0..@min(data.len, 48)],
+                            if (data.len > 48) "..." else "",
+                        });
 
                         try stdout_queue.putOne(io, data);
                     },

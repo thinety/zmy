@@ -260,7 +260,11 @@ fn mainLoop(
             },
             .ptyout => |data| {
                 defer gpa.free(data);
-                log.info("Event.ptyout: data={b64}", .{data});
+                log.info("Event.ptyout: data.len={} data={b64}{s}", .{
+                    data.len,
+                    data[0..@min(data.len, 48)],
+                    if (data.len > 48) "..." else "",
+                });
 
                 vt_stream.nextSlice(data);
 
@@ -283,7 +287,7 @@ fn mainLoop(
                         // client hasn't properly connected yet
                         if (client.winsize == null) continue;
 
-                        // TODO: use reference counting instead of copying data
+                        // TODO(thiago): use reference counting instead of copying data
                         const client_data = try gpa.dupe(u8, vt_stream_buffer.written());
                         const message: ipc.DaemonMessage = .{ .data = client_data };
                         client.message_queue.putOne(io, message) catch |err| {

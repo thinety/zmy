@@ -439,7 +439,7 @@ pub const Handler = struct {
 
                 try self.vt_stream.writeAll("\x1b[");
                 switch (value) {
-                    .unset => {}, // try self.vt_stream.writeByte('0'),
+                    .unset => {},
                     .bold => try self.vt_stream.writeByte('1'),
                     .faint => try self.vt_stream.writeByte('2'),
                     .italic => try self.vt_stream.writeByte('3'),
@@ -523,7 +523,6 @@ pub const Handler = struct {
 
                 const flags_int = value.flags.int();
                 try self.vt_stream.print("\x1b[={d}u", .{flags_int});
-                // try self.vt_stream.print("\x1b[={d};1u", .{flags_int});
             },
             .kitty_keyboard_set_or => {
                 self.terminal.screens.active.kitty_keyboard.set(.@"or", value.flags);
@@ -614,39 +613,81 @@ pub const Handler = struct {
             },
             .mouse_shape => {
                 self.terminal.mouse_shape = value;
+
+                // TODO(thiago): forward to self.vt_stream
             },
             .color_operation => {
                 if (value.requests.count() == 0) return;
                 var it = value.requests.constIterator(0);
                 while (it.next()) |req| {
                     switch (req.*) {
-                        .set => |set| {
-                            switch (set.target) {
-                                .palette => |i| {
-                                    self.terminal.flags.dirty.palette = true;
-                                    self.terminal.colors.palette.set(i, set.color);
-                                },
-                                .dynamic => |dynamic| switch (dynamic) {
-                                    .foreground => self.terminal.colors.foreground.set(set.color),
-                                    .background => self.terminal.colors.background.set(set.color),
-                                    .cursor => self.terminal.colors.cursor.set(set.color),
-                                    .pointer_foreground,
-                                    .pointer_background,
-                                    .tektronix_foreground,
-                                    .tektronix_background,
-                                    .highlight_background,
-                                    .tektronix_cursor,
-                                    .highlight_foreground,
-                                    => {},
-                                },
-                                .special => {},
-                            }
+                        .query => |target| switch (target) {
+                            .palette => |i| {
+                                _ = i;
+                            },
+                            .special => |special| switch (special) {
+                                .bold,
+                                .underline,
+                                .blink,
+                                .reverse,
+                                .italic,
+                                => {},
+                            },
+                            .dynamic => |dynamic| switch (dynamic) {
+                                .foreground,
+                                .background,
+                                .cursor,
+                                .pointer_foreground,
+                                .pointer_background,
+                                .tektronix_foreground,
+                                .tektronix_background,
+                                .highlight_background,
+                                .tektronix_cursor,
+                                .highlight_foreground,
+                                => {},
+                            },
+                        },
+
+                        .set => |set| switch (set.target) {
+                            .palette => |i| {
+                                self.terminal.flags.dirty.palette = true;
+                                self.terminal.colors.palette.set(i, set.color);
+                            },
+                            .special => |special| switch (special) {
+                                .bold,
+                                .underline,
+                                .blink,
+                                .reverse,
+                                .italic,
+                                => {},
+                            },
+                            .dynamic => |dynamic| switch (dynamic) {
+                                .foreground => self.terminal.colors.foreground.set(set.color),
+                                .background => self.terminal.colors.background.set(set.color),
+                                .cursor => self.terminal.colors.cursor.set(set.color),
+                                .pointer_foreground,
+                                .pointer_background,
+                                .tektronix_foreground,
+                                .tektronix_background,
+                                .highlight_background,
+                                .tektronix_cursor,
+                                .highlight_foreground,
+                                => {},
+                            },
                         },
 
                         .reset => |target| switch (target) {
                             .palette => |i| {
                                 self.terminal.flags.dirty.palette = true;
                                 self.terminal.colors.palette.reset(i);
+                            },
+                            .special => |special| switch (special) {
+                                .bold,
+                                .underline,
+                                .blink,
+                                .reverse,
+                                .italic,
+                                => {},
                             },
                             .dynamic => |dynamic| switch (dynamic) {
                                 .foreground => self.terminal.colors.foreground.reset(),
@@ -661,7 +702,6 @@ pub const Handler = struct {
                                 .highlight_foreground,
                                 => {},
                             },
-                            .special => {},
                         },
 
                         .reset_palette => {
@@ -674,49 +714,33 @@ pub const Handler = struct {
                             mask.* = .initEmpty();
                         },
 
-                        .query => |target| {
-                            const c = self.terminal.colorForXterm(target) orelse continue;
-                            switch (target) {
-                                .palette => |i| {
-                                    try self.pty.print("\x1b]4;{d};", .{i});
-                                    try c.encodeRgb16(self.pty);
-                                    try self.pty.writeAll(value.terminator.string());
-                                },
-                                .dynamic => |dynamic| switch (dynamic) {
-                                    .foreground,
-                                    .background,
-                                    .cursor,
-                                    => {
-                                        try self.pty.print("\x1b]{d};", .{@intFromEnum(dynamic)});
-                                        try c.encodeRgb16(self.pty);
-                                        try self.pty.writeAll(value.terminator.string());
-                                    },
-                                    .pointer_foreground,
-                                    .pointer_background,
-                                    .tektronix_foreground,
-                                    .tektronix_background,
-                                    .highlight_background,
-                                    .tektronix_cursor,
-                                    .highlight_foreground,
-                                    => {},
-                                },
-                                .special => {},
-                            }
-                        },
-
                         .reset_special => {},
                     }
                 }
             },
             .kitty_color_report => {
-                var response_is_empty: bool = true;
-
                 for (value.list.items) |item| {
                     switch (item) {
+                        .query => |key| switch (key) {
+                            .palette => |i| {
+                                _ = i;
+                            },
+                            .special => |special| switch (special) {
+                                .foreground,
+                                .background,
+                                .selection_foreground,
+                                .selection_background,
+                                .cursor,
+                                .cursor_text,
+                                .visual_bell,
+                                .second_transparent_background,
+                                => {},
+                            },
+                        },
                         .set => |v| switch (v.key) {
-                            .palette => |palette| {
+                            .palette => |i| {
                                 self.terminal.flags.dirty.palette = true;
-                                self.terminal.colors.palette.set(palette, v.color);
+                                self.terminal.colors.palette.set(i, v.color);
                             },
                             .special => |special| switch (special) {
                                 .foreground => self.terminal.colors.foreground.set(v.color),
@@ -731,9 +755,9 @@ pub const Handler = struct {
                             },
                         },
                         .reset => |key| switch (key) {
-                            .palette => |palette| {
+                            .palette => |i| {
                                 self.terminal.flags.dirty.palette = true;
-                                self.terminal.colors.palette.reset(palette);
+                                self.terminal.colors.palette.reset(i);
                             },
                             .special => |special| switch (special) {
                                 .foreground => self.terminal.colors.foreground.reset(),
@@ -747,26 +771,11 @@ pub const Handler = struct {
                                 => {},
                             },
                         },
-                        .query => |key| {
-                            const color = self.terminal.colorForKitty(key);
-                            if (color == null and !key.hasTerminalQueryColor()) continue;
-
-                            if (response_is_empty) {
-                                try self.pty.writeAll("\x1b]21");
-                                response_is_empty = false;
-                            }
-                            try self.pty.print(";{f}=", .{key});
-
-                            if (color) |c| try c.encodeRgb8(self.pty);
-                        },
                     }
-                }
-
-                if (!response_is_empty) {
-                    try self.pty.writeAll(value.terminator.string());
                 }
             },
 
+            // TODO(thiago): forward only APC sequences not answered by us
             // APC
             .apc_start => {
                 self.apc_handler.start();
@@ -852,7 +861,7 @@ pub const Handler = struct {
                 }
             },
             .enquiry => {
-                // TODO(thiago): do we need this? ENQ (0x05)
+                // TODO(thiago): do we need to answer this? ENQ (0x05)
             },
             .kitty_keyboard_query => {
                 try self.pty.print("\x1b[?{}u", .{
@@ -947,23 +956,31 @@ pub const Handler = struct {
                 try self.vt_stream.print("\x1b]52;{c};{s}\x1b\\", .{ value.kind, value.data });
             },
 
-            .dcs_hook => {
-                var cmd = self.dcs_handler.hook(
-                    self.gpa,
-                    value,
-                ) orelse return;
+            .dcs_hook, .dcs_put, .dcs_unhook => |a| {
+                var cmd = switch (a) {
+                    .dcs_hook => self.dcs_handler.hook(self.gpa, value),
+                    .dcs_put => self.dcs_handler.put(value),
+                    .dcs_unhook => self.dcs_handler.unhook(),
+                    else => unreachable,
+                } orelse return;
                 defer cmd.deinit();
-                try self.dcsCommand(&cmd);
-            },
-            .dcs_put => {
-                var cmd = self.dcs_handler.put(value) orelse return;
-                defer cmd.deinit();
-                try self.dcsCommand(&cmd);
-            },
-            .dcs_unhook => {
-                var cmd = self.dcs_handler.unhook() orelse return;
-                defer cmd.deinit();
-                try self.dcsCommand(&cmd);
+
+                switch (cmd) {
+                    .decrqss => |request| {
+                        var response: [dcs.Command.DECRQSS.max_response_bytes]u8 = undefined;
+                        const encoded = try request.encode(self.terminal, &response);
+                        try self.pty.writeAll(encoded);
+                    },
+
+                    .xtgettcap => |*gettcap| {
+                        const map = comptime terminfo.zmy.xtgettcapMap();
+                        while (gettcap.next()) |key| {
+                            try self.pty.writeAll(map.get(key) orelse continue);
+                        }
+                    },
+
+                    .tmux => {},
+                }
             },
 
             // Have no terminal-modifying effect
@@ -980,73 +997,56 @@ pub const Handler = struct {
         // Set the mode on the terminal
         self.terminal.modes.set(mode, enabled);
 
-        // Some modes require additional processing and/or forwarding
+        // Some modes require additional processing
         switch (mode) {
-            .autorepeat,
-            .reverse_colors,
-            => {
-                try self.forwardMode(mode, enabled);
-            },
-
-            .origin => {
+            inline .origin => |m| {
                 self.terminal.setCursorPos(1, 1);
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
 
-            .enable_left_and_right_margin => {
+            inline .enable_left_and_right_margin => |m| {
                 if (!enabled) {
                     self.terminal.scrolling_region.left = 0;
                     self.terminal.scrolling_region.right = self.terminal.cols - 1;
                 }
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
 
-            .alt_screen_legacy => {
+            inline .alt_screen_legacy => |m| {
                 try self.terminal.switchScreenMode(.@"47", enabled);
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
-            .alt_screen => {
+            inline .alt_screen => |m| {
                 try self.terminal.switchScreenMode(.@"1047", enabled);
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
-            .alt_screen_save_cursor_clear_enter => {
+            inline .alt_screen_save_cursor_clear_enter => |m| {
                 try self.terminal.switchScreenMode(.@"1049", enabled);
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
 
-            .save_cursor => {
+            inline .save_cursor => |m| {
                 if (enabled) {
                     self.terminal.saveCursor();
                 } else {
                     self.terminal.restoreCursor();
                 }
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
 
-            .enable_mode_3 => {
-                try self.forwardMode(mode, enabled);
-            },
-
-            .@"132_column" => {
+            inline .@"132_column" => |m| {
                 try self.terminal.deccolm(
                     self.terminal.screens.active.alloc,
                     if (enabled) .@"132_cols" else .@"80_cols",
                 );
 
-                try self.forwardMode(mode, enabled);
-            },
-
-            .synchronized_output,
-            .linefeed,
-            .focus_event,
-            => {
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
 
             .in_band_size_reports => {
@@ -1060,64 +1060,64 @@ pub const Handler = struct {
                 }
             },
 
-            .mouse_event_x10 => {
-                if (enabled) {
-                    self.terminal.flags.mouse_event = .x10;
-                } else {
-                    self.terminal.flags.mouse_event = .none;
-                }
+            inline .mouse_event_x10 => |m| {
+                self.terminal.flags.mouse_event = if (enabled) .x10 else .none;
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
-            .mouse_event_normal => {
-                if (enabled) {
-                    self.terminal.flags.mouse_event = .normal;
-                } else {
-                    self.terminal.flags.mouse_event = .none;
-                }
+            inline .mouse_event_normal => |m| {
+                self.terminal.flags.mouse_event = if (enabled) .normal else .none;
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
-            .mouse_event_button => {
-                if (enabled) {
-                    self.terminal.flags.mouse_event = .button;
-                } else {
-                    self.terminal.flags.mouse_event = .none;
-                }
+            inline .mouse_event_button => |m| {
+                self.terminal.flags.mouse_event = if (enabled) .button else .none;
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
-            .mouse_event_any => {
-                if (enabled) {
-                    self.terminal.flags.mouse_event = .any;
-                } else {
-                    self.terminal.flags.mouse_event = .none;
-                }
+            inline .mouse_event_any => |m| {
+                self.terminal.flags.mouse_event = if (enabled) .any else .none;
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
 
-            .mouse_format_utf8 => {
+            inline .mouse_format_utf8 => |m| {
                 self.terminal.flags.mouse_format = if (enabled) .utf8 else .x10;
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
-            .mouse_format_sgr => {
+            inline .mouse_format_sgr => |m| {
                 self.terminal.flags.mouse_format = if (enabled) .sgr else .x10;
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
-            .mouse_format_urxvt => {
+            inline .mouse_format_urxvt => |m| {
                 self.terminal.flags.mouse_format = if (enabled) .urxvt else .x10;
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
-            .mouse_format_sgr_pixels => {
+            inline .mouse_format_sgr_pixels => |m| {
                 self.terminal.flags.mouse_format = if (enabled) .sgr_pixels else .x10;
 
-                try self.forwardMode(mode, enabled);
+                try self.forwardMode(m, enabled);
             },
 
+            .report_visibility => {
+                if (enabled) {
+                    const visibility: device_status.Visibility = if (self.terminal.flags.visible)
+                        .potentially_visible
+                    else
+                        .not_visible;
+                    try device_status.encodeVisibilityReport(self.pty, visibility);
+                }
+            },
+
+            inline .autorepeat,
+            .reverse_colors,
+            .enable_mode_3,
+            .synchronized_output,
+            .linefeed,
+            .focus_event,
             .disable_keyboard,
             .insert,
             .send_receive_mode,
@@ -1137,50 +1137,18 @@ pub const Handler = struct {
             .bracketed_paste,
             .grapheme_cluster,
             .report_color_scheme,
-            => {
-                try self.forwardMode(mode, enabled);
-            },
-            .report_visibility => {
-                if (enabled) {
-                    const visibility: device_status.Visibility = if (self.terminal.flags.visible)
-                        .potentially_visible
-                    else
-                        .not_visible;
-                    try device_status.encodeVisibilityReport(self.pty, visibility);
-                }
-
-                try self.forwardMode(mode, enabled);
+            => |m| {
+                try self.forwardMode(m, enabled);
             },
         }
     }
 
-    fn forwardMode(self: *Handler, mode: modes.Mode, enabled: bool) !void {
-        const mode_int = @intFromEnum(mode);
-        const mode_tag: modes.ModeTag = @bitCast(mode_int);
-        const final_byte: u8 = if (enabled) 'h' else 'l';
-        if (mode_tag.ansi) {
-            try self.vt_stream.print("\x1b[{d}{c}", .{ mode_tag.value, final_byte });
-        } else {
-            try self.vt_stream.print("\x1b[?{d}{c}", .{ mode_tag.value, final_byte });
-        }
-    }
-
-    fn dcsCommand(self: *Handler, cmd: *dcs.Command) !void {
-        switch (cmd.*) {
-            .decrqss => |request| {
-                var response: [dcs.Command.DECRQSS.max_response_bytes]u8 = undefined;
-                const encoded = try request.encode(self.terminal, &response);
-                try self.pty.writeAll(encoded);
-            },
-
-            .xtgettcap => |*gettcap| {
-                const map = comptime terminfo.zmy.xtgettcapMap();
-                while (gettcap.next()) |key| {
-                    try self.pty.writeAll(map.get(key) orelse continue);
-                }
-            },
-
-            .tmux => {},
-        }
+    fn forwardMode(self: *Handler, comptime mode: modes.Mode, enabled: bool) !void {
+        const tag: modes.ModeTag = .fromMode(mode);
+        try self.vt_stream.print("\x1b[{s}{d}{s}", .{
+            if (tag.ansi) "" else "?",
+            tag.value,
+            if (enabled) "h" else "l",
+        });
     }
 };

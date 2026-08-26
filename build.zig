@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zmy",
         .root_module = exe_mod,
-        // TODO: FIXME: https://codeberg.org/ziglang/zig/issues/31272
+        // TODO(thiago): FIXME: https://codeberg.org/ziglang/zig/issues/31272
         .use_llvm = true,
         .use_lld = true,
     });
@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
 
     const exe_test = b.addTest(.{
         .root_module = exe_mod,
-        // TODO: FIXME: https://codeberg.org/ziglang/zig/issues/31272
+        // TODO(thiago): FIXME: https://codeberg.org/ziglang/zig/issues/31272
         .use_llvm = true,
         .use_lld = true,
     });
