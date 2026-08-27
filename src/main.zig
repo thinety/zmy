@@ -13,16 +13,11 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const gpa = init.gpa;
     const io = init.io;
-
-    const shell =
-        if (init.environ_map.get("SHELL")) |s|
-            try arena.dupeZ(u8, s)
-        else
-            "/bin/sh";
+    const environ_map = init.environ_map;
 
     const rundir =
-        init.environ_map.get("ZMY_DIR") orelse
-        if (init.environ_map.get("XDG_RUNTIME_DIR")) |xdg_rundir|
+        environ_map.get("ZMY_DIR") orelse
+        if (environ_map.get("XDG_RUNTIME_DIR")) |xdg_rundir|
             try std.fs.path.join(arena, &.{ xdg_rundir, "zmy" })
         else
             "/tmp/zmy";
@@ -32,37 +27,45 @@ pub fn main(init: std.process.Init) !void {
         else => |e| return e,
     };
 
-    const session_name =
-        if (init.environ_map.get("ZMY_SESSION")) |session|
-            try arena.dupeZ(u8, session)
+    const shell =
+        if (environ_map.get("SHELL")) |s|
+            try arena.dupeZ(u8, s)
         else
-            null;
+            "/bin/sh";
 
     var args = init.minimal.args.iterate();
     _ = args.next();
     const cmd = args.next() orelse return help(io);
 
     if (std.mem.eql(u8, cmd, "daemon")) {
-        const session_name_ = args.next() orelse session_name orelse return help(io);
+        const session_name = args.next() orelse return help(io);
         return runDaemon(
             arena,
             gpa,
             io,
-            shell,
+            environ_map,
             rundir,
-            session_name_,
+            session_name,
+            shell,
         );
     }
 
     if (std.mem.eql(u8, cmd, "attach")) {
-        const session_name_ = args.next() orelse session_name orelse return help(io);
+        const session_name = args.next() orelse return help(io);
+
+        if (environ_map.get("ZMY_SESSION")) |session| {
+            if (std.mem.eql(u8, session_name, session)) {
+                return error.RecursiveAttach;
+            }
+        }
+
         try closeStderrIfTty();
         return runAttach(
             arena,
             gpa,
             io,
             rundir,
-            session_name_,
+            session_name,
         );
     }
 
@@ -94,16 +97,12 @@ fn runDaemon(
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
-    shell: [:0]const u8,
+    environ_map: *const std.process.Environ.Map,
     rundir: []const u8,
-    session_name: [:0]const u8,
+    session_name: []const u8,
+    shell: [:0]const u8,
 ) !void {
-    const path = try std.fs.path.join(gpa, &.{ rundir, session_name });
-    defer gpa.free(path);
-
-    const address: std.Io.net.UnixAddress = try .init(path);
-
-    try daemon.run(arena, gpa, io, shell, address);
+    try daemon.run(arena, gpa, io, environ_map, rundir, session_name, shell);
 }
 
 fn runAttach(
@@ -113,14 +112,9 @@ fn runAttach(
     rundir: []const u8,
     session_name: [:0]const u8,
 ) !void {
-    const path = try std.fs.path.join(gpa, &.{ rundir, session_name });
-    defer gpa.free(path);
-
-    const address: std.Io.net.UnixAddress = try .init(path);
-
     var retries: u32 = 0;
     while (true) {
-        client.run(gpa, io, address) catch |err| switch (err) {
+        client.run(gpa, io, rundir, session_name) catch |err| switch (err) {
             error.FileNotFound,
             error.Unexpected, // errno=111 ECONNREFUSED
             => |e| {
