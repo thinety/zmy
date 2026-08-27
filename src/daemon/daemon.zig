@@ -282,7 +282,8 @@ fn mainLoop(
                         // client hasn't properly connected yet
                         if (client.winsize == null) continue;
 
-                        // TODO(thiago): use reference counting instead of copying data
+                        // ideally we should use some kind of reference counting here
+                        // instead of copying the same data to every client
                         const client_data = try gpa.dupe(u8, vt_stream_buffer.written());
                         const message: ipc.DaemonMessage = .{ .data = client_data };
                         async.timeout(io, .fromMilliseconds(200), .real, .{
