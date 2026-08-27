@@ -1,6 +1,7 @@
 const std = @import("std");
 const ghostty = @import("ghostty-vt");
 const c = @import("c");
+const constants = @import("constants");
 const async = @import("../async.zig");
 const ipc = @import("../ipc.zig");
 const client_mod = @import("client.zig");
@@ -38,8 +39,8 @@ pub const Event = union(enum) {
     }
 };
 
-pub fn run(gpa: std.mem.Allocator, io: std.Io, shell: [:0]const u8, address: std.Io.net.UnixAddress) !void {
-    const pty = try spawnShell(shell);
+pub fn run(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, shell: [:0]const u8, address: std.Io.net.UnixAddress) !void {
+    const pty = try spawnShell(arena, shell);
     defer pty.close(io);
 
     var server = address.listen(io, .{}) catch |err| switch (err) {
@@ -374,7 +375,7 @@ fn doResize(
     }
 }
 
-fn spawnShell(shell: [:0]const u8) !std.Io.File {
+fn spawnShell(arena: std.mem.Allocator, shell: [:0]const u8) !std.Io.File {
     var pty_fd: c_int = undefined;
     const winsize: c.struct_winsize = .{
         .ws_col = default_winsize.col,
@@ -396,10 +397,42 @@ fn spawnShell(shell: [:0]const u8) !std.Io.File {
     };
     defer comptime unreachable;
 
+    var environ: std.ArrayList(?[*:0]const u8) = .empty;
+    {
+        var i: usize = 0;
+        while (std.c.environ[i]) |e| : (i += 1) {
+            const e_slice = std.mem.span(e);
+            if (std.mem.startsWith(u8, e_slice, "TERM=")) continue;
+            if (std.mem.startsWith(u8, e_slice, "TERM_PROGRAM=")) continue;
+            if (std.mem.startsWith(u8, e_slice, "TERM_PROGRAM_VERSION=")) continue;
+            if (std.mem.startsWith(u8, e_slice, "COLORTERM=")) continue;
+            environ.append(arena, e) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    log.err("out of memory", .{});
+                    std.process.exit(1);
+                },
+            };
+        }
+        for ([_]?[*:0]const u8{
+            "TERM=" ++ constants.TERM,
+            "TERM_PROGRAM=" ++ constants.program_name,
+            "TERM_PROGRAM_VERSION=" ++ constants.program_version,
+            "COLORTERM=truecolor",
+            null,
+        }) |e| {
+            environ.append(arena, e) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    log.err("out of memory", .{});
+                    std.process.exit(1);
+                },
+            };
+        }
+    }
+
     switch (std.c.errno(std.c.execve(
         shell,
         &.{shell},
-        std.c.environ,
+        environ.items[0.. :null].ptr,
     ))) {
         .SUCCESS => unreachable,
         else => |err| {

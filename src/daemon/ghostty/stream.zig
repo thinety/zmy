@@ -1,5 +1,6 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
+const constants = @import("constants");
 const terminfo = @import("terminfo.zig");
 
 const Terminal = ghostty_vt.Terminal;
@@ -946,7 +947,7 @@ pub const Handler = struct {
                 try self.vt_stream.writeAll("\x1b\\");
             },
             .xtversion => {
-                const version = "zmy 0.0.1";
+                const version = constants.program_name ++ " " ++ constants.program_version;
                 try self.pty.print("\x1BP>|{s}\x1B\\", .{version});
             },
             .clipboard_contents => {

@@ -14,21 +14,29 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
-    const shell = init.environ_map.get("SHELL") orelse "/bin/sh";
+    const shell =
+        if (init.environ_map.get("SHELL")) |s|
+            try arena.dupeZ(u8, s)
+        else
+            "/bin/sh";
 
-    const rundir = if (init.environ_map.get("ZMY_DIR")) |zmy_rundir|
-        try arena.dupe(u8, zmy_rundir)
-    else if (init.environ_map.get("XDG_RUNTIME_DIR")) |xdg_rundir|
-        try std.fs.path.join(arena, &.{ xdg_rundir, "zmy" })
-    else
-        try arena.dupe(u8, "/tmp/zmy");
+    const rundir =
+        init.environ_map.get("ZMY_DIR") orelse
+        if (init.environ_map.get("XDG_RUNTIME_DIR")) |xdg_rundir|
+            try std.fs.path.join(arena, &.{ xdg_rundir, "zmy" })
+        else
+            "/tmp/zmy";
 
     std.Io.Dir.cwd().createDir(io, rundir, @enumFromInt(0o755)) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
     };
 
-    const session_name = init.environ_map.get("ZMY_SESSION");
+    const session_name =
+        if (init.environ_map.get("ZMY_SESSION")) |session|
+            try arena.dupeZ(u8, session)
+        else
+            null;
 
     var args = init.minimal.args.iterate();
     _ = args.next();
@@ -37,18 +45,25 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "daemon")) {
         const session_name_ = args.next() orelse session_name orelse return help(io);
         return runDaemon(
+            arena,
             gpa,
             io,
-            try arena.dupeZ(u8, shell),
+            shell,
             rundir,
-            try arena.dupeZ(u8, session_name_),
+            session_name_,
         );
     }
 
     if (std.mem.eql(u8, cmd, "attach")) {
         const session_name_ = args.next() orelse session_name orelse return help(io);
         try closeStderrIfTty();
-        return runAttach(gpa, io, rundir, try arena.dupeZ(u8, session_name_));
+        return runAttach(
+            arena,
+            gpa,
+            io,
+            rundir,
+            session_name_,
+        );
     }
 
     return help(io);
@@ -76,6 +91,7 @@ fn help(io: std.Io) !void {
 }
 
 fn runDaemon(
+    arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
     shell: [:0]const u8,
@@ -87,10 +103,11 @@ fn runDaemon(
 
     const address: std.Io.net.UnixAddress = try .init(path);
 
-    try daemon.run(gpa, io, shell, address);
+    try daemon.run(arena, gpa, io, shell, address);
 }
 
 fn runAttach(
+    arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
     rundir: []const u8,
@@ -108,7 +125,7 @@ fn runAttach(
             error.Unexpected, // errno=111 ECONNREFUSED
             => |e| {
                 if (retries == 2) return e;
-                if (retries == 0) try spawnDaemon(rundir, session_name);
+                if (retries == 0) try spawnDaemon(arena, rundir, session_name);
                 try io.sleep(.fromMilliseconds(50), .real);
                 retries += 1;
                 continue;
@@ -119,7 +136,7 @@ fn runAttach(
     }
 }
 
-fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
+fn spawnDaemon(arena: std.mem.Allocator, rundir: []const u8, session_name: [:0]const u8) !void {
     // by forking, we allow the parent to continue, and we also guarantee that the
     // new process is not a process group leader. otherwise, `setsid()` would fail.
     const pid = std.c.fork();
@@ -177,19 +194,15 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
 
     // open log file as stderr
     {
-        var buffer: [4096]u8 = undefined;
-        var fba: std.heap.FixedBufferAllocator = .init(&buffer);
-        const alloc = fba.allocator();
-
-        const filename = std.fmt.allocPrint(alloc, "{s}.log", .{session_name}) catch |err| switch (err) {
+        const filename = std.fmt.allocPrint(arena, "{s}.log", .{session_name}) catch |err| switch (err) {
             error.OutOfMemory => {
-                log.err("log filename too long", .{});
+                log.err("out of memory", .{});
                 std.process.exit(1);
             },
         };
-        const path = std.fs.path.joinZ(alloc, &.{ rundir, filename }) catch |err| switch (err) {
+        const path = std.fs.path.joinZ(arena, &.{ rundir, filename }) catch |err| switch (err) {
             error.OutOfMemory => {
-                log.err("log filepath too long", .{});
+                log.err("out of memory", .{});
                 std.process.exit(1);
             },
         };

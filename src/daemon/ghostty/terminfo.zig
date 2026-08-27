@@ -1,4 +1,5 @@
 const std = @import("std");
+const constants = @import("constants");
 
 /// Terminfo source format. This can be used to encode terminfo files.
 /// This cannot parse terminfo source files yet because it isn't something
@@ -151,22 +152,21 @@ fn comptimeReplace(
     }
 }
 
-/// zmy's terminfo entry.
 pub const zmy: Source = .{
     .names = &.{
         // We support the "xterm-" prefix because some poorly behaved programs
         // use this to detect if the terminal supports 256 colors and other
         // features.
-        // HACK: This is a hack on a hack...we use "xterm-zmy" to prevent
+        // HACK: This is a hack on a hack...we use "xterm-*" to prevent
         // vim from breaking, and when we do this as the default we break
         // tcell-based applications (lazygit, aerc, etc). tcell has a bug where
         // the primary terminfo name must be the value of TERM.
         // https://github.com/gdamore/tcell/pull/639 fixes the issue but is not
         // merged yet. Consider switching these in the future.
-        "xterm-zmy",
+        constants.TERM,
 
         // The preferred name
-        "zmy",
+        constants.program_name,
     },
 
     // NOTE: These capabilities are super underdocumented and I'm not 100%

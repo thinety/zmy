@@ -4,9 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const check_step = b.step("check", "Check if zmy compiles");
+    const check_step = b.step("check", "Check if the program compiles");
     const install_step = b.getInstallStep();
-    const run_step = b.step("run", "Run zmy");
+    const run_step = b.step("run", "Run the program");
     const test_step = b.step("test", "Run tests");
 
     const translate_c = b.addTranslateC(.{
@@ -34,6 +34,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    const constants = b.addOptions();
+    constants.addOption([:0]const u8, "TERM", "xterm-zmy");
+    constants.addOption([:0]const u8, "program_name", @tagName(@import("build.zig.zon").name));
+    constants.addOption([:0]const u8, "program_version", @import("build.zig.zon").version);
+    exe_mod.addOptions("constants", constants);
 
     const exe = b.addExecutable(.{
         .name = "zmy",
