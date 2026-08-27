@@ -183,9 +183,9 @@ fn runConnect(
     session_name: []const u8,
 ) !void {
     const port_ = try std.fmt.parseInt(u16, port, 10);
-    const address = std.Io.net.IpAddress.parse(destination, port_) catch {
+    const address = std.Io.net.IpAddress.parse(destination, port_) catch |err| {
         // TODO(thiago): support for hostnames
-        return;
+        return err;
     };
     var stream = try address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
