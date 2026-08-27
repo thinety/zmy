@@ -166,7 +166,7 @@ pub const zmy: Source = .{
         constants.TERM,
 
         // The preferred name
-        constants.program_name,
+        constants.PROGRAM_NAME,
     },
 
     // NOTE: These capabilities are super underdocumented and I'm not 100%

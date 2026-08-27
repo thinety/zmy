@@ -947,7 +947,7 @@ pub const Handler = struct {
                 try self.vt_stream.writeAll("\x1b\\");
             },
             .xtversion => {
-                const version = constants.program_name ++ " " ++ constants.program_version;
+                const version = constants.PROGRAM_NAME ++ " " ++ constants.PROGRAM_VERSION;
                 try self.pty.print("\x1BP>|{s}\x1B\\", .{version});
             },
             .clipboard_contents => {

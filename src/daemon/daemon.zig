@@ -443,8 +443,8 @@ fn createShellEnviron(
 
     for ([_]?[*:0]const u8{
         "TERM=" ++ constants.TERM,
-        "TERM_PROGRAM=" ++ constants.program_name,
-        "TERM_PROGRAM_VERSION=" ++ constants.program_version,
+        "TERM_PROGRAM=" ++ constants.PROGRAM_NAME,
+        "TERM_PROGRAM_VERSION=" ++ constants.PROGRAM_VERSION,
         "COLORTERM=truecolor",
         try std.fmt.allocPrintSentinel(
             arena,
