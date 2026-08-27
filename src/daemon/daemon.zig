@@ -4,7 +4,7 @@ const c = @import("c");
 const constants = @import("constants");
 const async = @import("../async.zig");
 const ipc = @import("../ipc.zig");
-const client_mod = @import("client.zig");
+const socket_mod = @import("socket.zig");
 const pty_mod = @import("pty.zig");
 const stream_mod = @import("ghostty/stream.zig");
 const formatter_mod = @import("ghostty/formatter.zig");
@@ -175,7 +175,7 @@ fn mainLoop(
                 }
 
                 const task = try io.concurrent(
-                    client_mod.handleClient,
+                    socket_mod.handleClient,
                     .{ gpa, io, stream, client, &client.message_queue, event_queue },
                 );
                 client.* = .{
