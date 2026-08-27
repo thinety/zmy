@@ -27,6 +27,8 @@ pub fn formatTerminal(
     {
         inline for (@typeInfo(modes.Mode).@"enum".fields) |field| {
             const mode: modes.Mode = @enumFromInt(field.value);
+            if (mode == .in_band_size_reports) continue;
+            if (mode == .report_visibility) continue;
             const current = terminal.modes.get(mode);
             const default_val = @field(terminal.modes.default, field.name);
 
