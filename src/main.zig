@@ -2,6 +2,7 @@ const std = @import("std");
 
 const client = @import("client/client.zig");
 const daemon = @import("daemon/daemon.zig");
+const proxy = @import("proxy/proxy.zig");
 
 pub const std_options: std.Options = .{
     // TODO(thiago): FIXME: submit patch to zig (errno=111 below)
@@ -27,6 +28,8 @@ pub fn main(init: std.process.Init) !void {
         else => |e| return e,
     };
 
+    const session = environ_map.get("ZMY_SESSION");
+
     const shell =
         if (environ_map.get("SHELL")) |s|
             try arena.dupeZ(u8, s)
@@ -39,32 +42,58 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, cmd, "daemon")) {
         const session_name = args.next() orelse return help(io);
+
         return runDaemon(
-            arena,
             gpa,
             io,
-            environ_map,
             rundir,
             session_name,
             shell,
         );
     }
 
+    if (std.mem.eql(u8, cmd, "proxy")) {
+        const address = args.next() orelse return help(io);
+        const port = args.next() orelse return help(io);
+
+        return runProxy(
+            gpa,
+            io,
+            address,
+            port,
+            rundir,
+        );
+    }
+
     if (std.mem.eql(u8, cmd, "attach")) {
         const session_name = args.next() orelse return help(io);
 
-        if (environ_map.get("ZMY_SESSION")) |session| {
-            if (std.mem.eql(u8, session_name, session)) {
+        if (session) |s| {
+            if (std.mem.eql(u8, session_name, s)) {
                 return error.RecursiveAttach;
             }
         }
 
         try closeStderrIfTty();
         return runAttach(
-            arena,
             gpa,
             io,
             rundir,
+            session_name,
+        );
+    }
+
+    if (std.mem.eql(u8, cmd, "connect")) {
+        const destination = args.next() orelse return help(io);
+        const port = args.next() orelse return help(io);
+        const session_name = args.next() orelse return help(io);
+
+        try closeStderrIfTty();
+        return runConnect(
+            gpa,
+            io,
+            destination,
+            port,
             session_name,
         );
     }
@@ -79,9 +108,11 @@ fn help(io: std.Io) !void {
         \\Usage: zmy <command> [args...]
         \\
         \\Commands:
-        \\  attach <name>               Attach to session, creating if needed
-        \\  daemon <name>               Runs the daemon process
-        \\  help                        Show this help
+        \\  attach <session-name>                           Attach to session, creating if needed
+        \\  connect <destination> <port> <session-name>     Attach to remote session
+        \\  daemon <session-name>                           Runs the daemon process
+        \\  proxy <address> <port>                          Runs the proxy process
+        \\  help                                            Show this help
         \\
     ;
 
@@ -94,43 +125,123 @@ fn help(io: std.Io) !void {
 }
 
 fn runDaemon(
-    arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
-    environ_map: *const std.process.Environ.Map,
     rundir: []const u8,
     session_name: []const u8,
     shell: [:0]const u8,
 ) !void {
-    try daemon.run(arena, gpa, io, environ_map, rundir, session_name, shell);
+    const path = try std.fs.path.join(gpa, &.{ rundir, session_name });
+    defer gpa.free(path);
+
+    const address: std.Io.net.UnixAddress = try .init(path);
+    var server = address.listen(io, .{}) catch |err| switch (err) {
+        error.AddressInUse => blk: {
+            try std.Io.Dir.deleteFileAbsolute(io, address.path);
+            break :blk try address.listen(io, .{});
+        },
+        else => |e| return e,
+    };
+    defer {
+        server.deinit(io);
+        std.Io.Dir.deleteFileAbsolute(io, address.path) catch {};
+    }
+
+    try daemon.run(gpa, io, &server, session_name, shell);
+}
+
+fn runProxy(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    address: []const u8,
+    port: []const u8,
+    rundir: []const u8,
+) !void {
+    const port_ = try std.fmt.parseInt(u16, port, 10);
+    const address_: std.Io.net.IpAddress = try .parse(address, port_);
+    var server = try address_.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+
+    try proxy.run(gpa, io, &server, rundir);
 }
 
 fn runAttach(
-    arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
     rundir: []const u8,
     session_name: [:0]const u8,
 ) !void {
+    const stream = try connectToSocket(gpa, io, rundir, session_name);
+    defer stream.close(io);
+
+    try client.run(gpa, io, stream);
+}
+
+fn runConnect(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    destination: []const u8,
+    port: []const u8,
+    session_name: []const u8,
+) !void {
+    const port_ = try std.fmt.parseInt(u16, port, 10);
+    const address = std.Io.net.IpAddress.parse(destination, port_) catch {
+        // TODO(thiago): support for hostnames
+        return;
+    };
+    var stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    // for now we do the most basic session negotiation possible:
+    // we say which session we want and hope for the best
+    {
+        var buffer: [256]u8 = undefined;
+        var stream_writer = stream.writer(io, &buffer);
+        const writer = &stream_writer.interface;
+
+        writer.writeInt(usize, session_name.len, .little) catch |err| switch (err) {
+            error.WriteFailed => return stream_writer.err.?,
+        };
+        writer.writeAll(session_name) catch |err| switch (err) {
+            error.WriteFailed => return stream_writer.err.?,
+        };
+
+        try writer.flush();
+    }
+
+    try client.run(gpa, io, stream);
+}
+
+pub fn connectToSocket(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    rundir: []const u8,
+    session_name: [:0]const u8,
+) !std.Io.net.Stream {
+    const path = try std.fs.path.join(gpa, &.{ rundir, session_name });
+    defer gpa.free(path);
+
+    const address: std.Io.net.UnixAddress = try .init(path);
+
     var retries: u32 = 0;
     while (true) {
-        client.run(gpa, io, rundir, session_name) catch |err| switch (err) {
+        const stream = address.connect(io) catch |err| switch (err) {
             error.FileNotFound,
             error.Unexpected, // errno=111 ECONNREFUSED
             => |e| {
                 if (retries == 2) return e;
-                if (retries == 0) try spawnDaemon(arena, rundir, session_name);
+                if (retries == 0) try spawnDaemon(rundir, session_name);
                 try io.sleep(.fromMilliseconds(50), .real);
                 retries += 1;
                 continue;
             },
             else => |e| return e,
         };
-        break;
+        return stream;
     }
 }
 
-fn spawnDaemon(arena: std.mem.Allocator, rundir: []const u8, session_name: [:0]const u8) !void {
+fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
     // by forking, we allow the parent to continue, and we also guarantee that the
     // new process is not a process group leader. otherwise, `setsid()` would fail.
     const pid = std.c.fork();
@@ -188,13 +299,20 @@ fn spawnDaemon(arena: std.mem.Allocator, rundir: []const u8, session_name: [:0]c
 
     // open log file as stderr
     {
-        const filename = std.fmt.allocPrint(arena, "{s}.log", .{session_name}) catch |err| switch (err) {
+        const filename = std.fmt.allocPrint(
+            std.heap.page_allocator,
+            "{s}.log",
+            .{session_name},
+        ) catch |err| switch (err) {
             error.OutOfMemory => {
                 log.err("out of memory", .{});
                 std.process.exit(1);
             },
         };
-        const path = std.fs.path.joinZ(arena, &.{ rundir, filename }) catch |err| switch (err) {
+        const path = std.fs.path.joinZ(
+            std.heap.page_allocator,
+            &.{ rundir, filename },
+        ) catch |err| switch (err) {
             error.OutOfMemory => {
                 log.err("out of memory", .{});
                 std.process.exit(1);

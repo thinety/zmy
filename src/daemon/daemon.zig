@@ -40,32 +40,14 @@ pub const Event = union(enum) {
 };
 
 pub fn run(
-    arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
     io: std.Io,
-    environ_map: *const std.process.Environ.Map,
-    rundir: []const u8,
+    server: *std.Io.net.Server,
     session_name: []const u8,
     shell: [:0]const u8,
 ) !void {
-    const pty = try spawnShell(arena, environ_map, session_name, shell);
+    const pty = try spawnShell(shell, session_name);
     defer pty.close(io);
-
-    const path = try std.fs.path.join(gpa, &.{ rundir, session_name });
-    defer gpa.free(path);
-
-    const address: std.Io.net.UnixAddress = try .init(path);
-    var server = address.listen(io, .{}) catch |err| switch (err) {
-        error.AddressInUse => blk: {
-            try std.Io.Dir.deleteFileAbsolute(io, address.path);
-            break :blk try address.listen(io, .{});
-        },
-        else => |e| return e,
-    };
-    defer {
-        server.deinit(io);
-        std.Io.Dir.deleteFileAbsolute(io, address.path) catch {};
-    }
 
     var event_queue_buffer: [16]Event = undefined;
     var event_queue: std.Io.Queue(Event) = .init(&event_queue_buffer);
@@ -90,7 +72,7 @@ pub fn run(
     try try async.race(io, .{
         .{ pty_mod.readPty, .{ gpa, io, pty, &event_queue } },
         .{ pty_mod.writePty, .{ gpa, io, &ptyin_queue, pty } },
-        .{ acceptLoop, .{ io, &server, &event_queue } },
+        .{ acceptLoop, .{ io, server, &event_queue } },
         .{ mainLoop, .{ gpa, io, pty, &event_queue, &ptyin_queue } },
     });
 }
@@ -196,8 +178,6 @@ fn mainLoop(
                     client_mod.handleClient,
                     .{ gpa, io, stream, client, &client.message_queue, event_queue },
                 );
-                errdefer task.cancel(io);
-
                 client.* = .{
                     .stream = stream,
                     .winsize = null,
@@ -305,11 +285,18 @@ fn mainLoop(
                         // TODO(thiago): use reference counting instead of copying data
                         const client_data = try gpa.dupe(u8, vt_stream_buffer.written());
                         const message: ipc.DaemonMessage = .{ .data = client_data };
-                        client.message_queue.putOne(io, message) catch |err| {
+                        async.timeout(io, .fromMilliseconds(200), .real, .{
+                            @TypeOf(client.message_queue).putOne,
+                            .{ &client.message_queue, io, message },
+                        }) catch |err| {
                             gpa.free(client_data);
                             switch (err) {
                                 error.Closed => {},
-                                error.Canceled => |e| return e,
+                                error.Timeout => {
+                                    log.warn("client was too slow, dropping: stream={}", .{client.stream.socket.handle});
+                                    client.message_queue.close(io);
+                                },
+                                else => |e| return e,
                             }
                         };
                     }
@@ -388,10 +375,8 @@ fn doResize(
 }
 
 fn spawnShell(
-    arena: std.mem.Allocator,
-    environ_map: *const std.process.Environ.Map,
-    session_name: []const u8,
     shell: [:0]const u8,
+    session_name: []const u8,
 ) !std.Io.File {
     var pty_fd: c_int = undefined;
     const winsize: c.struct_winsize = .{
@@ -414,9 +399,8 @@ fn spawnShell(
     };
     defer comptime unreachable;
 
-    const childEnviron = createChildEnviron(
-        arena,
-        environ_map,
+    const shellEnviron = createShellEnviron(
+        std.heap.page_allocator,
         session_name,
     ) catch |err| switch (err) {
         error.OutOfMemory => {
@@ -424,10 +408,11 @@ fn spawnShell(
             std.process.exit(1);
         },
     };
+
     switch (std.c.errno(std.c.execve(
         shell,
         &.{shell},
-        childEnviron,
+        shellEnviron,
     ))) {
         .SUCCESS => unreachable,
         else => |err| {
@@ -437,27 +422,21 @@ fn spawnShell(
     }
 }
 
-fn createChildEnviron(
+fn createShellEnviron(
     arena: std.mem.Allocator,
-    environ_map: *const std.process.Environ.Map,
     session_name: []const u8,
 ) ![*:null]?[*:0]const u8 {
     var environ: std.ArrayList(?[*:0]const u8) = .empty;
 
-    var it = environ_map.iterator();
-    while (it.next()) |e| {
-        if (std.mem.eql(u8, e.key_ptr.*, "TERM")) continue;
-        if (std.mem.eql(u8, e.key_ptr.*, "TERM_PROGRAM")) continue;
-        if (std.mem.eql(u8, e.key_ptr.*, "TERM_PROGRAM_VERSION")) continue;
-        if (std.mem.eql(u8, e.key_ptr.*, "COLORTERM")) continue;
-        if (std.mem.eql(u8, e.key_ptr.*, "ZMY_SESSION")) continue;
+    var i: usize = 0;
+    while (std.c.environ[i]) |env| : (i += 1) {
+        const e = std.mem.span(env);
+        if (std.mem.startsWith(u8, e, "TERM=")) continue;
+        if (std.mem.startsWith(u8, e, "TERM_PROGRAM=")) continue;
+        if (std.mem.startsWith(u8, e, "TERM_PROGRAM_VERSION=")) continue;
+        if (std.mem.startsWith(u8, e, "COLORTERM=")) continue;
+        if (std.mem.startsWith(u8, e, "ZMY_SESSION=")) continue;
 
-        const env = try std.fmt.allocPrintSentinel(
-            arena,
-            "{s}={s}",
-            .{ e.key_ptr.*, e.value_ptr.* },
-            0,
-        );
         try environ.append(arena, env);
     }
 

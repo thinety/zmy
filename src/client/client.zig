@@ -30,8 +30,7 @@ pub const Event = union(enum) {
 pub fn run(
     gpa: std.mem.Allocator,
     io: std.Io,
-    rundir: []const u8,
-    session_name: []const u8,
+    stream: std.Io.net.Stream,
 ) !void {
     var sigset = std.os.linux.sigemptyset();
     std.os.linux.sigaddset(&sigset, std.os.linux.SIG.WINCH);
@@ -58,13 +57,6 @@ pub fn run(
         .flags = .{ .nonblocking = false },
     };
     defer signals.close(io);
-
-    const path = try std.fs.path.join(gpa, &.{ rundir, session_name });
-    defer gpa.free(path);
-
-    const address: std.Io.net.UnixAddress = try .init(path);
-    var stream = try address.connect(io);
-    defer stream.close(io);
 
     // reset terminal
     {

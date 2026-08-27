@@ -180,10 +180,43 @@ pub fn race(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Canceled }
     }
 }
 
+pub fn timeout(io: std.Io, duration: std.Io.Duration, clock: std.Io.Clock, task: anytype) timeoutRet(@TypeOf(task)) {
+    const T = @TypeOf(task);
+
+    const U = union(enum) {
+        task: taskRet(T),
+        sleep: error{Canceled}!void,
+    };
+
+    var select_buffer: [2]U = undefined;
+    var select: std.Io.Select(U) = .init(io, &select_buffer);
+
+    defer {
+        while (select.cancel()) |v| {
+            switch (v) {
+                .task => |x| {
+                    if (cancelFn(task)) |cancel| {
+                        cancel(x);
+                    }
+                },
+                .sleep => {},
+            }
+        }
+    }
+
+    try select.concurrent(.task, task[0], task[1]);
+    try select.concurrent(.sleep, std.Io.sleep, .{ io, duration, clock });
+
+    switch (try select.await()) {
+        .task => |x| return x,
+        .sleep => return error.Timeout,
+    }
+}
+
 fn joinTuple(A: type) type {
     var types: [taskCount(A)]type = undefined;
     for (0..taskCount(A)) |i| {
-        types[i] = taskRet(A, i);
+        types[i] = taskRet(taskType(A, i));
     }
     return @Tuple(&types);
 }
@@ -191,7 +224,7 @@ fn joinTuple(A: type) type {
 fn allErrors(A: type) type {
     var E: type = error{};
     for (0..taskCount(A)) |i| {
-        E = E || @typeInfo(taskRet(A, i)).error_union.error_set;
+        E = E || @typeInfo(taskRet(taskType(A, i))).error_union.error_set;
     }
     return E;
 }
@@ -199,7 +232,7 @@ fn allErrors(A: type) type {
 fn payloadTuple(A: type) type {
     var types: [taskCount(A)]type = undefined;
     for (0..taskCount(A)) |i| {
-        types[i] = @typeInfo(taskRet(A, i)).error_union.payload;
+        types[i] = @typeInfo(taskRet(taskType(A, i))).error_union.payload;
     }
     return @Tuple(&types);
 }
@@ -207,15 +240,15 @@ fn payloadTuple(A: type) type {
 fn errorTuple(A: type) type {
     var types: [taskCount(A)]type = undefined;
     for (0..taskCount(A)) |i| {
-        types[i] = @typeInfo(taskRet(A, i)).error_union.error_set;
+        types[i] = @typeInfo(taskRet(taskType(A, i))).error_union.error_set;
     }
     return @Tuple(&types);
 }
 
 fn commonPayload(A: type) type {
-    const P0 = @typeInfo(taskRet(A, 0)).error_union.payload;
+    const P0 = @typeInfo(taskRet(taskType(A, 0))).error_union.payload;
     for (1..taskCount(A)) |i| {
-        const Pi = @typeInfo(taskRet(A, i)).error_union.payload;
+        const Pi = @typeInfo(taskRet(taskType(A, i))).error_union.payload;
         if (Pi != P0) {
             @compileError(std.fmt.comptimePrint(
                 "race/raceOk require all tasks to return the same payload type; " ++
@@ -238,23 +271,34 @@ fn selectUnion(A: type) type {
     for (0..N) |i| {
         names[i] = std.fmt.comptimePrint("{d}", .{i});
         vals[i] = i;
-        types[i] = taskRet(A, i);
+        types[i] = taskRet(taskType(A, i));
         attrs[i] = .{};
     }
 
     return @Union(.auto, @Enum(u32, .exhaustive, &names, &vals), &names, &types, &attrs);
 }
 
-fn taskRet(A: type, i: u32) type {
+fn taskType(A: type, i: u32) type {
+    return @typeInfo(A).@"struct".fields[i].type;
+}
+
+fn taskRet(T: type) type {
     return @typeInfo(
-        @typeInfo(
-            @typeInfo(A).@"struct".fields[i].type,
-        ).@"struct".fields[0].type,
+        @typeInfo(T).@"struct".fields[0].type,
     ).@"fn".return_type.?;
 }
 
 fn taskCount(A: type) u32 {
     return @typeInfo(A).@"struct".fields.len;
+}
+
+fn timeoutRet(T: type) type {
+    const error_union = @typeInfo(taskRet(T)).error_union;
+    return (error{
+        ConcurrencyUnavailable,
+        Canceled,
+        Timeout,
+    } || error_union.error_set)!error_union.payload;
 }
 
 inline fn cancelFn(task: anytype) ?*const fn (@typeInfo(@typeInfo(@TypeOf(task)).@"struct".fields[0].type).@"fn".return_type.?) void {

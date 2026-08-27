@@ -3,7 +3,7 @@ const async = @import("../async.zig");
 const ipc = @import("../ipc.zig");
 const daemon = @import("daemon.zig");
 
-const log = std.log.scoped(.zmy_daemon_client);
+const log = std.log.scoped(.zmy_daemon);
 
 pub fn handleClient(
     gpa: std.mem.Allocator,
@@ -13,25 +13,40 @@ pub fn handleClient(
     message_queue: *std.Io.Queue(ipc.DaemonMessage),
     event_queue: *std.Io.Queue(daemon.Event),
 ) void {
-    async.race(io, .{
-        .{ readSocket, .{ gpa, io, stream, event_queue, client } },
-        .{ writeSocket, .{ gpa, io, message_queue, stream } },
-    }) catch |err| switch (err) {
+    handleClient_(
+        gpa,
+        io,
+        stream,
+        client,
+        message_queue,
+        event_queue,
+    ) catch |err| switch (err) {
         error.Canceled => {},
         else => |e| {
-            log.err("race error: {t}", .{e});
+            log.err("handleClient error: {t}", .{e});
         },
-    } catch |err| {
-        log.err("readSocket/writeSocket error: {t}", .{err});
     };
+}
 
-    const event: daemon.Event = .{ .client_disconnected = client };
-    event_queue.putOne(io, event) catch |err| switch (err) {
-        error.Closed => unreachable,
-        error.Canceled => {},
-    };
+pub fn handleClient_(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    client: *anyopaque,
+    message_queue: *std.Io.Queue(ipc.DaemonMessage),
+    event_queue: *std.Io.Queue(daemon.Event),
+) !void {
+    try try async.race(io, .{
+        .{ readSocket, .{ gpa, io, stream, event_queue, client } },
+        .{ writeSocket, .{ gpa, io, message_queue, stream } },
+    });
 
     message_queue.close(io);
+
+    const event: daemon.Event = .{ .client_disconnected = client };
+    event_queue.putOneUncancelable(io, event) catch |err| switch (err) {
+        error.Closed => unreachable,
+    };
 }
 
 fn readSocket(
