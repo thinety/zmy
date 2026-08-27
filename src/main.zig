@@ -74,7 +74,6 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        try closeStderrIfTty();
         return runAttach(
             gpa,
             io,
@@ -88,7 +87,6 @@ pub fn main(init: std.process.Init) !void {
         const port = args.next() orelse return help(io);
         const session_name = args.next() orelse return help(io);
 
-        try closeStderrIfTty();
         return runConnect(
             gpa,
             io,
@@ -357,37 +355,6 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
         else => |err| {
             log.err("execve() failed: {t}", .{err});
             std.process.exit(1);
-        },
-    }
-}
-
-fn closeStderrIfTty() !void {
-    if (std.c.isatty(std.c.STDERR_FILENO) == 0) {
-        return;
-    }
-
-    const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .RDWR });
-    switch (std.c.errno(dev_null)) {
-        .SUCCESS => {},
-        else => |err| {
-            log.err("open(/dev/null, O_RDWR) failed: {t}", .{err});
-            return error.Open;
-        },
-    }
-
-    switch (std.c.errno(std.c.dup2(dev_null, std.c.STDERR_FILENO))) {
-        .SUCCESS => {},
-        else => |err| {
-            log.err("dup2({}, {}) failed: {t}", .{ dev_null, std.c.STDERR_FILENO, err });
-            return error.Dup2;
-        },
-    }
-
-    switch (std.c.errno(std.c.close(dev_null))) {
-        .SUCCESS => {},
-        else => |err| {
-            log.err("close({}) failed: {t}", .{ dev_null, err });
-            return error.Close;
         },
     }
 }

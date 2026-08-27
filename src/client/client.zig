@@ -58,6 +58,7 @@ pub fn run(
     };
     defer signals.close(io);
 
+    try closeStderrIfTty();
     // reset terminal
     {
         const stdout = std.Io.File.stdout();
@@ -253,4 +254,35 @@ fn getWinsize() !ipc.Winsize {
         .xpixel = winsize.xpixel,
         .ypixel = winsize.ypixel,
     };
+}
+
+fn closeStderrIfTty() !void {
+    if (std.c.isatty(std.c.STDERR_FILENO) == 0) {
+        return;
+    }
+
+    const dev_null = std.c.open("/dev/null", .{ .ACCMODE = .RDWR });
+    switch (std.c.errno(dev_null)) {
+        .SUCCESS => {},
+        else => |err| {
+            log.err("open(/dev/null, O_RDWR) failed: {t}", .{err});
+            return error.Open;
+        },
+    }
+
+    switch (std.c.errno(std.c.dup2(dev_null, std.c.STDERR_FILENO))) {
+        .SUCCESS => {},
+        else => |err| {
+            log.err("dup2({}, {}) failed: {t}", .{ dev_null, std.c.STDERR_FILENO, err });
+            return error.Dup2;
+        },
+    }
+
+    switch (std.c.errno(std.c.close(dev_null))) {
+        .SUCCESS => {},
+        else => |err| {
+            log.err("close({}) failed: {t}", .{ dev_null, err });
+            return error.Close;
+        },
+    }
 }
