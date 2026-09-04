@@ -46,7 +46,13 @@ pub fn run(
     session_name: []const u8,
     shell: [:0]const u8,
 ) !void {
-    const pty = try spawnShell(shell, session_name);
+    var winsize: ipc.Winsize = .{
+        .col = 80,
+        .row = 24,
+        .xpixel = 0,
+        .ypixel = 0,
+    };
+    const pty = try spawnShell(winsize, shell, session_name);
     defer pty.close(io);
 
     var event_queue_buffer: [16]Event = undefined;
@@ -73,7 +79,7 @@ pub fn run(
         .{ pty_mod.readPty, .{ gpa, io, pty, &event_queue } },
         .{ pty_mod.writePty, .{ gpa, io, &ptyin_queue, pty } },
         .{ acceptLoop, .{ io, server, &event_queue } },
-        .{ mainLoop, .{ gpa, io, pty, &event_queue, &ptyin_queue } },
+        .{ mainLoop, .{ gpa, io, pty, &winsize, &event_queue, &ptyin_queue } },
     });
 }
 
@@ -115,6 +121,7 @@ fn mainLoop(
     gpa: std.mem.Allocator,
     io: std.Io,
     pty: std.Io.File,
+    last_winsize: *ipc.Winsize,
     event_queue: *std.Io.Queue(Event),
     ptyin_queue: *std.Io.Queue([]u8),
 ) !void {
@@ -137,8 +144,8 @@ fn mainLoop(
     defer vt_stream_buffer.deinit();
 
     var term = try ghostty.Terminal.init(io, gpa, .{
-        .cols = default_winsize.col,
-        .rows = default_winsize.row,
+        .cols = last_winsize.col,
+        .rows = last_winsize.row,
     });
     defer term.deinit(gpa);
 
@@ -198,7 +205,7 @@ fn mainLoop(
                         const first_winsize = client.winsize == null;
                         client.winsize = winsize;
 
-                        try doResize(clients, &vt_stream_handler, pty);
+                        try doResize(clients, &vt_stream_handler, pty, last_winsize);
                         if (pty_buffer.written().len > 0) {
                             defer pty_buffer.clearRetainingCapacity();
 
@@ -243,7 +250,7 @@ fn mainLoop(
                 client.deinit(gpa, io);
                 gpa.destroy(client);
 
-                try doResize(clients, &vt_stream_handler, pty);
+                try doResize(clients, &vt_stream_handler, pty, last_winsize);
                 if (pty_buffer.written().len > 0) {
                     defer pty_buffer.clearRetainingCapacity();
 
@@ -307,17 +314,11 @@ fn mainLoop(
     }
 }
 
-const default_winsize: ipc.Winsize = .{
-    .col = 80,
-    .row = 24,
-    .xpixel = 0,
-    .ypixel = 0,
-};
-
 fn doResize(
     clients: std.DoublyLinkedList,
     vt_stream_handler: *stream_mod.Handler,
     pty: std.Io.File,
+    last_winsize: *ipc.Winsize,
 ) !void {
     var optional_final_winsize: ?ipc.Winsize = null;
 
@@ -337,30 +338,28 @@ fn doResize(
         }
     }
 
-    const final_winsize = optional_final_winsize orelse default_winsize;
+    var final_winsize = optional_final_winsize orelse return;
+
+    if (final_winsize.col == last_winsize.col and
+        final_winsize.row == last_winsize.row and
+        final_winsize.xpixel == last_winsize.xpixel and
+        final_winsize.ypixel == last_winsize.ypixel)
+    {
+        // make sure to be different from the last winsize, in order to guarantee
+        // that a SIGWINCH is delivered to the child process
+        final_winsize.xpixel ^= 1;
+    }
+    last_winsize.* = final_winsize;
 
     try vt_stream_handler.resize(.{
         .cols = final_winsize.col,
         .rows = final_winsize.row,
         .cell_size_px = .{
-            .width = final_winsize.xpixel / final_winsize.col,
-            .height = final_winsize.ypixel / final_winsize.row,
+            .width = @divFloor(final_winsize.xpixel, final_winsize.col),
+            .height = @divFloor(final_winsize.ypixel, final_winsize.row),
         },
     });
 
-    // twice to force redraw
-    switch (std.c.errno(std.c.ioctl(pty.handle, std.c.T.IOCSWINSZ, &std.c.winsize{
-        .col = final_winsize.col,
-        .row = final_winsize.row,
-        .xpixel = 0,
-        .ypixel = 0,
-    }))) {
-        .SUCCESS => {},
-        else => |err| {
-            log.err("ioctl({}, T.IOCSWINSZ) failed: {t}", .{ pty.handle, err });
-            return error.Ioctl;
-        },
-    }
     switch (std.c.errno(std.c.ioctl(pty.handle, std.c.T.IOCSWINSZ, &std.c.winsize{
         .col = final_winsize.col,
         .row = final_winsize.row,
@@ -376,15 +375,16 @@ fn doResize(
 }
 
 fn spawnShell(
+    initial_winsize: ipc.Winsize,
     shell: [:0]const u8,
     session_name: []const u8,
 ) !std.Io.File {
     var pty_fd: c_int = undefined;
     const winsize: c.struct_winsize = .{
-        .ws_col = default_winsize.col,
-        .ws_row = default_winsize.row,
-        .ws_xpixel = default_winsize.xpixel,
-        .ws_ypixel = default_winsize.ypixel,
+        .ws_col = initial_winsize.col,
+        .ws_row = initial_winsize.row,
+        .ws_xpixel = initial_winsize.xpixel,
+        .ws_ypixel = initial_winsize.ypixel,
     };
     const pid = c.forkpty(&pty_fd, null, null, &winsize);
     switch (std.c.errno(pid)) {
