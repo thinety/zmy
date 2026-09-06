@@ -32,39 +32,7 @@ pub fn run(
     io: std.Io,
     stream: std.Io.net.Stream,
 ) !void {
-    var sigset = std.os.linux.sigemptyset();
-    std.os.linux.sigaddset(&sigset, std.os.linux.SIG.WINCH);
-
-    // we must do this here so that spawned threads inherit the blocked mask
-    switch (std.os.linux.errno(std.os.linux.sigprocmask(std.os.linux.SIG.BLOCK, &sigset, null))) {
-        .SUCCESS => {},
-        else => |err| {
-            log.err("sigprocmask(SIG.BLOCK) failed: {t}", .{err});
-            return error.Sigprocmask;
-        },
-    }
-
-    const fd = std.os.linux.signalfd(-1, &sigset, 0);
-    switch (std.os.linux.errno(fd)) {
-        .SUCCESS => {},
-        else => |err| {
-            log.err("signalfd(-1) failed: {t}", .{err});
-            return error.Signalfd;
-        },
-    }
-    const signals: std.Io.File = .{
-        .handle = @intCast(fd),
-        .flags = .{ .nonblocking = false },
-    };
-    defer signals.close(io);
-
     try closeStderrIfTty();
-    // reset terminal
-    {
-        const stdout = std.Io.File.stdout();
-        var stdout_writer = stdout.writer(io, &.{});
-        try stdout_writer.interface.writeAll("\x1bc");
-    }
     defer {
         const stdout = std.Io.File.stdout();
         var stdout_writer = stdout.writer(io, &.{});
@@ -77,7 +45,6 @@ pub fn run(
 
     // get initial terminal configuration
     const termios = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
-
     // set raw mode
     {
         var raw_termios = termios;
@@ -107,7 +74,6 @@ pub fn run(
 
         try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw_termios);
     }
-
     // restore previous terminal mode
     defer {
         std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, termios) catch |err| {
@@ -145,11 +111,70 @@ pub fn run(
         }
     }
 
+    // parse the initial message before entering the read loop below
+    const client_id: ipc.ClientId = client_id: {
+        var stream_reader = stream.reader(io, &.{});
+        const reader = &stream_reader.interface;
+
+        const message = ipc.DaemonInitialMessage.deserialize(reader) catch |err| switch (err) {
+            error.ReadFailed => return stream_reader.err.?,
+            else => |e| return e,
+        };
+
+        break :client_id message.client_id;
+    };
+    // our loop detection mechanism: we ask to be detached from the daemon
+    // *downstream* from us by sending a detach request *upstream*. if this
+    // request hits the correct daemon, that means we just closed the loop
+    // and should detach immediately.
+    {
+        const data = try std.fmt.allocPrint(
+            gpa,
+            "\x1b_zmy;detach;client_id={x}\x1b\\",
+            .{&client_id},
+        );
+        errdefer gpa.free(data);
+
+        try stdout_queue.putOne(io, data);
+    }
+
+    const initial_message: ipc.ClientInitialMessage = .{
+        .winsize = try getWinsize(),
+    };
+
+    const signals: std.Io.File = signals: {
+        var sigset = std.os.linux.sigemptyset();
+        std.os.linux.sigaddset(&sigset, std.os.linux.SIG.WINCH);
+
+        // we must do this here so that spawned threads inherit the blocked mask
+        switch (std.os.linux.errno(std.os.linux.sigprocmask(std.os.linux.SIG.BLOCK, &sigset, null))) {
+            .SUCCESS => {},
+            else => |err| {
+                log.err("sigprocmask(SIG.BLOCK) failed: {t}", .{err});
+                return error.Sigprocmask;
+            },
+        }
+
+        const fd = std.os.linux.signalfd(-1, &sigset, 0);
+        switch (std.os.linux.errno(fd)) {
+            .SUCCESS => {},
+            else => |err| {
+                log.err("signalfd(-1) failed: {t}", .{err});
+                return error.Signalfd;
+            },
+        }
+        break :signals .{
+            .handle = @intCast(fd),
+            .flags = .{ .nonblocking = false },
+        };
+    };
+    defer signals.close(io);
+
     try try async.race(io, .{
         .{ stdio.readStdin, .{ gpa, io, &event_queue } },
         .{ stdio.writeStdout, .{ gpa, io, &stdout_queue } },
         .{ socket.readSocket, .{ gpa, io, stream, &event_queue } },
-        .{ socket.writeSocket, .{ gpa, io, &message_queue, stream } },
+        .{ socket.writeSocket, .{ gpa, io, &message_queue, stream, initial_message } },
         .{ readSignals, .{ io, signals, &event_queue } },
         .{ mainLoop, .{ gpa, io, &event_queue, &stdout_queue, &message_queue } },
     });
@@ -160,13 +185,6 @@ fn readSignals(
     signals: std.Io.File,
     event_queue: *std.Io.Queue(Event),
 ) !void {
-    // the first resize message is for "initialization" of the client
-    {
-        const winsize = try getWinsize();
-        const event: Event = .{ .resize = winsize };
-        try event_queue.putOne(io, event);
-    }
-
     var file_reader = signals.reader(io, &.{});
     const reader = &file_reader.interface;
 

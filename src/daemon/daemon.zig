@@ -13,11 +13,17 @@ const log = std.log.scoped(.zmy_daemon);
 
 pub const Event = union(enum) {
     client_connected: std.Io.net.Stream,
+    client_initial_message: struct {
+        client: *anyopaque,
+        message: ipc.ClientInitialMessage,
+    },
     client_message: struct {
         client: *anyopaque,
         message: ipc.ClientMessage,
     },
-    client_disconnected: *anyopaque,
+    client_disconnected: struct {
+        client: *anyopaque,
+    },
     ptyout: []u8,
 
     fn deinit(self: *Event, gpa: std.mem.Allocator, io: std.Io) void {
@@ -25,11 +31,14 @@ pub const Event = union(enum) {
             .client_connected => |stream| {
                 stream.close(io);
             },
-            .client_message => |*client_message| {
-                client_message.message.deinit(gpa);
+            .client_initial_message => |*payload| {
+                _ = payload;
             },
-            .client_disconnected => |client_ptr| {
-                _ = client_ptr;
+            .client_message => |*payload| {
+                payload.message.deinit(gpa);
+            },
+            .client_disconnected => |*payload| {
+                _ = payload;
             },
             .ptyout => |data| {
                 gpa.free(data);
@@ -99,9 +108,9 @@ fn acceptLoop(
 
 const Client = struct {
     node: std.DoublyLinkedList.Node = .{},
-    stream: std.Io.net.Stream,
+    id: ipc.ClientId,
     winsize: ?ipc.Winsize,
-    id: [16]u8,
+    stream: std.Io.net.Stream,
     message_queue_buffer: [8]ipc.DaemonMessage = undefined,
     message_queue: std.Io.Queue(ipc.DaemonMessage),
     task: std.Io.Future(void),
@@ -173,10 +182,9 @@ fn mainLoop(
                 const client = try gpa.create(Client);
                 errdefer gpa.destroy(client);
 
-                client.stream = stream;
-                client.winsize = null;
-
                 io.random(&client.id);
+                client.winsize = null;
+                client.stream = stream;
 
                 client.message_queue = .init(&client.message_queue_buffer);
                 errdefer {
@@ -187,37 +195,58 @@ fn mainLoop(
                     }
                 }
 
-                // our loop detection mechanism
-                {
-                    const data = try std.fmt.allocPrint(
-                        gpa,
-                        "\x1b_zmy;client_id={x}\x1b\\",
-                        .{&client.id},
-                    );
-                    errdefer gpa.free(data);
-
-                    const message: ipc.DaemonMessage = .{ .data = data };
-                    try client.message_queue.putOne(io, message);
-                }
-
+                const initial_message: ipc.DaemonInitialMessage = .{
+                    .client_id = client.id,
+                };
                 client.task = try io.concurrent(
                     socket_mod.handleClient,
-                    .{ gpa, io, stream, client, &client.message_queue, event_queue },
+                    .{
+                        gpa,
+                        io,
+                        stream,
+                        client,
+                        initial_message,
+                        &client.message_queue,
+                        event_queue,
+                    },
                 );
                 errdefer client.task.cancel(io);
 
                 clients.append(&client.node);
             },
-            .client_message => |client_message| {
-                switch (client_message.message) {
+            .client_initial_message => |payload| {
+                const client: *Client = @ptrCast(@alignCast(payload.client));
+                log.info("Event.client_initial_message: stream={}", .{client.stream.socket.handle});
+
+                std.debug.assert(client.winsize == null);
+                client.winsize = payload.message.winsize;
+
+                var allocating: std.Io.Writer.Allocating = .init(gpa);
+                defer allocating.deinit();
+
+                try formatter_mod.formatTerminal(&term, &allocating.writer);
+
+                if (allocating.writer.buffered().len > 0) {
+                    const data = try allocating.toOwnedSlice();
+                    const message: ipc.DaemonMessage = .{ .data = data };
+                    client.message_queue.putOne(io, message) catch |err| {
+                        gpa.free(data);
+                        switch (err) {
+                            error.Closed => {},
+                            else => |e| return e,
+                        }
+                    };
+                }
+            },
+            .client_message => |payload| {
+                switch (payload.message) {
                     .resize => |winsize| {
                         log.info(
                             "ClientMessage.resize: col={} row={} xpixel={} ypixel={}",
                             .{ winsize.col, winsize.row, winsize.xpixel, winsize.ypixel },
                         );
 
-                        const client: *Client = @ptrCast(@alignCast(client_message.client));
-                        const first_winsize = client.winsize == null;
+                        const client: *Client = @ptrCast(@alignCast(payload.client));
                         client.winsize = winsize;
 
                         try doResize(clients, &vt_stream_handler, pty, last_winsize);
@@ -228,25 +257,6 @@ fn mainLoop(
                             errdefer gpa.free(ptyin_data);
 
                             try ptyin_queue.putOne(io, ptyin_data);
-                        }
-
-                        if (first_winsize) {
-                            var allocating: std.Io.Writer.Allocating = .init(gpa);
-                            defer allocating.deinit();
-
-                            try formatter_mod.formatTerminal(&term, &allocating.writer);
-
-                            if (allocating.writer.buffered().len > 0) {
-                                const data = try allocating.toOwnedSlice();
-                                const message: ipc.DaemonMessage = .{ .data = data };
-                                client.message_queue.putOne(io, message) catch |err| {
-                                    gpa.free(data);
-                                    switch (err) {
-                                        error.Closed => {},
-                                        else => |e| return e,
-                                    }
-                                };
-                            }
                         }
                     },
                     .data => |data| {
@@ -261,8 +271,8 @@ fn mainLoop(
                     },
                 }
             },
-            .client_disconnected => |client_ptr| {
-                const client: *Client = @ptrCast(@alignCast(client_ptr));
+            .client_disconnected => |payload| {
+                const client: *Client = @ptrCast(@alignCast(payload.client));
                 log.info("Event.client_disconnected: stream={}", .{client.stream.socket.handle});
 
                 // TODO(thiago): we should actually have some proper shutdown messages
@@ -306,18 +316,17 @@ fn mainLoop(
 
                 vt_stream.nextSlice(data);
 
-                for (vt_stream_handler.seen_client_ids.items) |*client_id| {
+                for (vt_stream_handler.detach_requests.items) |*client_id| {
                     var it = clients.first;
                     while (it) |node| : (it = node.next) {
                         const client: *Client = @fieldParentPtr("node", node);
 
                         if (std.mem.eql(u8, client_id, &client.id)) {
-                            log.warn("attach loop detected, dropping client: stream={}", .{client.stream.socket.handle});
                             client.message_queue.close(io);
                         }
                     }
                 }
-                vt_stream_handler.seen_client_ids.clearRetainingCapacity();
+                vt_stream_handler.detach_requests.clearRetainingCapacity();
 
                 if (pty_buffer.written().len > 0) {
                     defer pty_buffer.clearRetainingCapacity();
@@ -335,7 +344,7 @@ fn mainLoop(
                     while (it) |node| : (it = node.next) {
                         const client: *Client = @fieldParentPtr("node", node);
 
-                        // client hasn't properly connected yet
+                        // client hasn't initialized yet
                         if (client.winsize == null) continue;
 
                         // ideally we should use some kind of reference counting here
