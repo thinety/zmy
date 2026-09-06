@@ -101,6 +101,7 @@ const Client = struct {
     node: std.DoublyLinkedList.Node = .{},
     stream: std.Io.net.Stream,
     winsize: ?ipc.Winsize,
+    id: [16]u8,
     message_queue_buffer: [8]ipc.DaemonMessage = undefined,
     message_queue: std.Io.Queue(ipc.DaemonMessage),
     task: std.Io.Future(void),
@@ -156,9 +157,9 @@ fn mainLoop(
         &vt_stream_buffer.writer,
         &term,
     );
-    var vt_stream = ghostty.Stream(stream_mod.Handler).init(.{
+    var vt_stream = ghostty.Stream(*stream_mod.Handler).init(.{
         .allocator = gpa,
-        .handler = vt_stream_handler,
+        .handler = &vt_stream_handler,
     });
     defer vt_stream.deinit();
 
@@ -172,25 +173,39 @@ fn mainLoop(
                 const client = try gpa.create(Client);
                 errdefer gpa.destroy(client);
 
-                var message_queue: std.Io.Queue(ipc.DaemonMessage) = .init(&client.message_queue_buffer);
+                client.stream = stream;
+                client.winsize = null;
+
+                io.random(&client.id);
+
+                client.message_queue = .init(&client.message_queue_buffer);
                 errdefer {
-                    message_queue.close(io);
+                    client.message_queue.close(io);
                     while (true) {
-                        var message = message_queue.getOne(io) catch break;
+                        var message = client.message_queue.getOne(io) catch break;
                         message.deinit(gpa);
                     }
                 }
 
-                const task = try io.concurrent(
+                // our loop detection mechanism
+                {
+                    const data = try std.fmt.allocPrint(
+                        gpa,
+                        "\x1b_zmy;client_id={x}\x1b\\",
+                        .{&client.id},
+                    );
+                    errdefer gpa.free(data);
+
+                    const message: ipc.DaemonMessage = .{ .data = data };
+                    try client.message_queue.putOne(io, message);
+                }
+
+                client.task = try io.concurrent(
                     socket_mod.handleClient,
                     .{ gpa, io, stream, client, &client.message_queue, event_queue },
                 );
-                client.* = .{
-                    .stream = stream,
-                    .winsize = null,
-                    .message_queue = message_queue,
-                    .task = task,
-                };
+                errdefer client.task.cancel(io);
+
                 clients.append(&client.node);
             },
             .client_message => |client_message| {
@@ -223,10 +238,14 @@ fn mainLoop(
 
                             if (allocating.writer.buffered().len > 0) {
                                 const data = try allocating.toOwnedSlice();
-                                errdefer gpa.free(data);
-
                                 const message: ipc.DaemonMessage = .{ .data = data };
-                                try client.message_queue.putOne(io, message);
+                                client.message_queue.putOne(io, message) catch |err| {
+                                    gpa.free(data);
+                                    switch (err) {
+                                        error.Closed => {},
+                                        else => |e| return e,
+                                    }
+                                };
                             }
                         }
                     },
@@ -245,6 +264,23 @@ fn mainLoop(
             .client_disconnected => |client_ptr| {
                 const client: *Client = @ptrCast(@alignCast(client_ptr));
                 log.info("Event.client_disconnected: stream={}", .{client.stream.socket.handle});
+
+                // TODO(thiago): we should actually have some proper shutdown messages
+                // instead of just closing the stream (which is done on `client.deinit`
+                // below).
+                //
+                // most of the times the client receives "FIN", the TCP
+                // connection is shutdown gracefully, and it breaks out of the
+                // read loop because of an `error.EndOfStream`. but sometimes
+                // we actually send a TCP "RST" because there's still data in
+                // that socket's read buffer, and this is surfaced on the client
+                // by means of an `error.ConnectionResetByPeer`.
+                //
+                // in summary, the client cannot tell why they're shutting down
+                // only based on the reason they break out of the read loop,
+                // because both `EndOfStream` and `ConnectionResetByPeer` can be
+                // raised on both graceful exit (inner pty closed because shell exited)
+                // and error conditions (client attached recursively or they're too slow).
 
                 clients.remove(&client.node);
                 client.deinit(gpa, io);
@@ -269,6 +305,19 @@ fn mainLoop(
                 });
 
                 vt_stream.nextSlice(data);
+
+                for (vt_stream_handler.seen_client_ids.items) |*client_id| {
+                    var it = clients.first;
+                    while (it) |node| : (it = node.next) {
+                        const client: *Client = @fieldParentPtr("node", node);
+
+                        if (std.mem.eql(u8, client_id, &client.id)) {
+                            log.warn("attach loop detected, dropping client: stream={}", .{client.stream.socket.handle});
+                            client.message_queue.close(io);
+                        }
+                    }
+                }
+                vt_stream_handler.seen_client_ids.clearRetainingCapacity();
 
                 if (pty_buffer.written().len > 0) {
                     defer pty_buffer.clearRetainingCapacity();

@@ -28,8 +28,6 @@ pub fn main(init: std.process.Init) !void {
         else => |e| return e,
     };
 
-    const session = environ_map.get("ZMY_SESSION");
-
     const shell =
         if (environ_map.get("SHELL")) |s|
             try arena.dupeZ(u8, s)
@@ -67,12 +65,6 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, cmd, "attach")) {
         const session_name = args.next() orelse return help(io);
-
-        if (session) |s| {
-            if (std.mem.eql(u8, session_name, s)) {
-                return error.RecursiveAttach;
-            }
-        }
 
         return runAttach(
             gpa,
