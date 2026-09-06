@@ -30,6 +30,34 @@ const csi = struct {
     const SizeReportStyle = ghostty_vt.SizeReportStyle;
 };
 
+// here is a list of everything that's not forwarded to `self.vt_stream`.
+// you can grep for the comments and read any extra explanations there.
+//
+// all the color operation control sequences are neither forwarded nor
+// answered. we want to be palette-agnostic, so we just drop them.
+// - no_forward(color_operation)
+// - no_forward(kitty_color_report)
+//
+// other than that, the general rationale is that if we somehow reply by
+// writing to `self.pty`, then we do *not* forward to `self.vt_stream`,
+// exactly because we want to avoid duplicate answers from the upstream
+// terminals of connected clients.
+// - no_forward(device_attributes)
+// - no_forward(device_status)
+// - no_forward(enquiry)
+// - no_forward(kitty_keyboard_query)
+// - no_forward(request_mode)
+// - no_forward(size_report)
+// - no_forward(xtversion)
+// - no_forward(dcs)
+// - no_forward(in_band_size_reports)
+// - no_forward(report_visibility)
+//
+// but sometimes, even if we reply, the control sequence must still be
+// forwarded, albeit with care. for example, we turn quiet mode to avoid
+// replies from attached clients.
+// - partially_forward(kitty_graphics)
+// - partially_forward(glyph_protocol)
 pub const Handler = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -615,9 +643,46 @@ pub const Handler = struct {
             .mouse_shape => {
                 self.terminal.mouse_shape = value;
 
-                // TODO(thiago): forward to self.vt_stream
+                const name = switch (value) {
+                    .default => "default",
+                    .context_menu => "context-menu",
+                    .help => "help",
+                    .pointer => "pointer",
+                    .progress => "progress",
+                    .wait => "wait",
+                    .cell => "cell",
+                    .crosshair => "crosshair",
+                    .text => "text",
+                    .vertical_text => "vertical-text",
+                    .alias => "alias",
+                    .copy => "copy",
+                    .move => "move",
+                    .no_drop => "no-drop",
+                    .not_allowed => "not-allowed",
+                    .grab => "grab",
+                    .grabbing => "grabbing",
+                    .all_scroll => "all-scroll",
+                    .col_resize => "col-resize",
+                    .row_resize => "row-resize",
+                    .n_resize => "n-resize",
+                    .e_resize => "e-resize",
+                    .s_resize => "s-resize",
+                    .w_resize => "w-resize",
+                    .ne_resize => "ne-resize",
+                    .nw_resize => "nw-resize",
+                    .se_resize => "se-resize",
+                    .sw_resize => "sw-resize",
+                    .ew_resize => "ew-resize",
+                    .ns_resize => "ns-resize",
+                    .nesw_resize => "nesw-resize",
+                    .nwse_resize => "nwse-resize",
+                    .zoom_in => "zoom-in",
+                    .zoom_out => "zoom-out",
+                };
+                try self.vt_stream.print("\x1b]22;{s}\x1b\\", .{name});
             },
             .color_operation => {
+                // no_forward(color_operation)
                 if (value.requests.count() == 0) return;
                 var it = value.requests.constIterator(0);
                 while (it.next()) |req| {
@@ -720,6 +785,7 @@ pub const Handler = struct {
                 }
             },
             .kitty_color_report => {
+                // no_forward(kitty_color_report)
                 for (value.list.items) |item| {
                     switch (item) {
                         .query => |key| switch (key) {
@@ -776,48 +842,6 @@ pub const Handler = struct {
                 }
             },
 
-            // TODO(thiago): forward only APC sequences not answered by us
-            // APC
-            .apc_start => {
-                self.apc_handler.start();
-
-                try self.vt_stream.writeAll("\x1b_");
-            },
-            .apc_put => {
-                self.apc_handler.feed(self.gpa, value);
-
-                try self.vt_stream.writeByte(value);
-            },
-            .apc_put_slice => {
-                self.apc_handler.feedSlice(self.gpa, value.bytes);
-
-                try self.vt_stream.writeAll(value.bytes);
-            },
-            .apc_end => {
-                var result = self.apc_handler.end() orelse return;
-                defer result.deinit(self.gpa);
-                switch (result) {
-                    .unknown => |*unknown| {
-                        _ = unknown;
-                    },
-                    .kitty => |*kitty_cmd| if (self.terminal.kittyGraphics(
-                        self.io,
-                        self.gpa,
-                        kitty_cmd,
-                    )) |resp| {
-                        try resp.encode(self.pty);
-                    },
-
-                    .glyph => |*glyph_req| {
-                        if (self.terminal.glyphProtocol(self.gpa, glyph_req)) |resp| {
-                            try resp.formatWire(self.pty);
-                        }
-                    },
-                }
-
-                try self.vt_stream.writeAll("\x1b\\");
-            },
-
             // Effect-based handlers
             .bell => {
                 try self.vt_stream.writeByte(0x07);
@@ -826,10 +850,15 @@ pub const Handler = struct {
                 try self.vt_stream.print("\x1b]9;{s};{s}\x1b\\", .{ value.title, value.body });
             },
             .device_attributes => {
+                // no_forward(device_attributes): we simply answer the query.
+                // we don't want to forward to avoid multiple answers from
+                // connected clients.
                 const attrs: device_attributes.Attributes = .{};
                 try attrs.encode(value, self.pty);
             },
             .device_status => {
+                // no_forward(device_status): we answer all queries except for
+                // the palette ones - again, we want to be palette-agnostic.
                 switch (value.request) {
                     .operating_status => try self.pty.writeAll("\x1B[0n"),
 
@@ -862,18 +891,22 @@ pub const Handler = struct {
                 }
             },
             .enquiry => {
+                // no_forward(enquiry)
                 // TODO(thiago): do we need to answer this? ENQ (0x05)
             },
             .kitty_keyboard_query => {
+                // no_forward(kitty_keyboard_query)
                 try self.pty.print("\x1b[?{}u", .{
                     self.terminal.screens.active.kitty_keyboard.current().int(),
                 });
             },
             .request_mode => {
+                // no_forward(request_mode)
                 const report = self.terminal.modes.getReport(.fromMode(value.mode));
                 try report.encode(self.pty);
             },
             .request_mode_unknown => {
+                // no_forward(request_mode)
                 const report = self.terminal.modes.getReport(.{
                     .value = @truncate(value.mode),
                     .ansi = value.ansi,
@@ -881,6 +914,7 @@ pub const Handler = struct {
                 try report.encode(self.pty);
             },
             .size_report => {
+                // no_forward(size_report)
                 switch (value) {
                     .csi_21_t => {
                         const title = self.terminal.getTitle() orelse "";
@@ -947,6 +981,7 @@ pub const Handler = struct {
                 try self.vt_stream.writeAll("\x1b\\");
             },
             .xtversion => {
+                // no_forward(xtversion)
                 const version = constants.PROGRAM_NAME ++ " " ++ constants.PROGRAM_VERSION;
                 try self.pty.print("\x1BP>|{s}\x1B\\", .{version});
             },
@@ -957,7 +992,10 @@ pub const Handler = struct {
                 try self.vt_stream.print("\x1b]52;{c};{s}\x1b\\", .{ value.kind, value.data });
             },
 
+            // DCS
             .dcs_hook, .dcs_put, .dcs_unhook => |a| {
+                // no_forward(dcs)
+
                 var cmd = switch (a) {
                     .dcs_hook => self.dcs_handler.hook(self.gpa, value),
                     .dcs_put => self.dcs_handler.put(value),
@@ -981,6 +1019,53 @@ pub const Handler = struct {
                     },
 
                     .tmux => {},
+                }
+            },
+
+            // APC
+            .apc_start => {
+                self.apc_handler.start();
+            },
+            .apc_put => {
+                self.apc_handler.feed(self.gpa, value);
+            },
+            .apc_put_slice => {
+                self.apc_handler.feedSlice(self.gpa, value.bytes);
+            },
+            .apc_end => {
+                var result = self.apc_handler.end() orelse return;
+                defer result.deinit(self.gpa);
+
+                switch (result) {
+                    .unknown => |*unknown| {
+                        if (unknown.truncated) {
+                            return error.ApcTruncated;
+                        }
+
+                        try self.vt_stream.print("\x1b_{s}\x1b\\", .{unknown.content});
+                    },
+                    .kitty => |*kitty_cmd| {
+                        if (self.terminal.kittyGraphics(
+                            self.io,
+                            self.gpa,
+                            kitty_cmd,
+                        )) |resp| {
+                            try resp.encode(self.pty);
+                        }
+
+                        // partially_forward(kitty_graphics)
+                        try self.forwardKittyGraphics(kitty_cmd);
+                    },
+
+                    .glyph => |*glyph_req| {
+                        if (self.terminal.glyphProtocol(self.gpa, glyph_req)) |resp| {
+                            try resp.formatWire(self.pty);
+                        }
+
+                        // partially_forward(glyph_protocol)
+                        // TODO(thiago): proper forwarding that avoids attached client responses
+                        // https://github.com/raphamorim/rio/blob/main/specs/glyph-protocol.md
+                    },
                 }
             },
 
@@ -1051,6 +1136,7 @@ pub const Handler = struct {
             },
 
             .in_band_size_reports => {
+                // no_forward(in_band_size_reports)
                 if (enabled) {
                     try size_report.encode(self.pty, .mode_2048, .{
                         .rows = self.terminal.rows,
@@ -1104,6 +1190,7 @@ pub const Handler = struct {
             },
 
             .report_visibility => {
+                // no_forward(report_visibility)
                 if (enabled) {
                     const visibility: device_status.Visibility = if (self.terminal.flags.visible)
                         .potentially_visible
@@ -1151,5 +1238,332 @@ pub const Handler = struct {
             tag.value,
             if (enabled) "h" else "l",
         });
+    }
+
+    /// Re-encode a parsed kitty graphics command back to the wire format
+    /// (`\x1b_G<control>;base64\x1b\\`) for the viewer, forcing the quiet
+    /// flag to `q=2`. Fields holding their default value are omitted: the
+    /// parser fills the same defaults for absent keys, so the re-encoded
+    /// command is semantically identical.
+    /// https://sw.kovidgoyal.net/kitty/graphics-protocol/
+    fn forwardKittyGraphics(self: *Handler, cmd: *const kitty.graphics.Command) !void {
+        const kv = struct {
+            fn chr(writer: *std.Io.Writer, key: u8, value: u8) !void {
+                try writer.print(",{c}={c}", .{ key, value });
+            }
+            fn uint(writer: *std.Io.Writer, key: u8, value: u32) !void {
+                try writer.print(",{c}={d}", .{ key, value });
+            }
+            fn iint(writer: *std.Io.Writer, key: u8, value: i32) !void {
+                try writer.print(",{c}={d}", .{ key, value });
+            }
+        };
+
+        try self.vt_stream.writeAll("\x1b_G");
+
+        switch (cmd.control) {
+            .query => |transmission| {
+                try self.vt_stream.print("a={c}", .{'q'});
+
+                _ = transmission; // handled below
+            },
+            .transmit => |transmission| {
+                try self.vt_stream.print("a={c}", .{'t'});
+
+                _ = transmission; // handled below
+            },
+            .transmit_and_display => |transmission_and_display| {
+                try self.vt_stream.print("a={c}", .{'T'});
+
+                _ = transmission_and_display; // handled below
+            },
+            .display => |display| {
+                try self.vt_stream.print("a={c}", .{'p'});
+
+                _ = display; // handled below
+            },
+            .delete => |delete| {
+                try self.vt_stream.print("a={c}", .{'d'});
+
+                switch (delete) {
+                    .all => |del| {
+                        try kv.chr(self.vt_stream, 'd', if (del) 'A' else 'a');
+                    },
+                    .id => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'I' else 'i');
+                        try kv.uint(self.vt_stream, 'i', v.image_id);
+                        if (v.placement_id != 0) {
+                            try kv.uint(self.vt_stream, 'p', v.placement_id);
+                        }
+                    },
+                    .newest => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'N' else 'n');
+                        try kv.uint(self.vt_stream, 'I', v.image_number);
+                        if (v.placement_id != 0) {
+                            try kv.uint(self.vt_stream, 'p', v.placement_id);
+                        }
+                    },
+                    .intersect_cursor => |del| {
+                        try kv.chr(self.vt_stream, 'd', if (del) 'C' else 'c');
+                    },
+                    .animation_frames => |del| {
+                        try kv.chr(self.vt_stream, 'd', if (del) 'F' else 'f');
+                    },
+                    .intersect_cell => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'P' else 'p');
+                        try kv.uint(self.vt_stream, 'x', v.x);
+                        try kv.uint(self.vt_stream, 'y', v.y);
+                    },
+                    .intersect_cell_z => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'Q' else 'q');
+                        try kv.uint(self.vt_stream, 'x', v.x);
+                        try kv.uint(self.vt_stream, 'y', v.y);
+                        try kv.iint(self.vt_stream, 'z', v.z);
+                    },
+                    .range => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'R' else 'r');
+                        try kv.uint(self.vt_stream, 'x', v.first);
+                        try kv.uint(self.vt_stream, 'y', v.last);
+                    },
+                    .column => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'X' else 'x');
+                        try kv.uint(self.vt_stream, 'x', v.x);
+                    },
+                    .row => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'Y' else 'y');
+                        try kv.uint(self.vt_stream, 'y', v.y);
+                    },
+                    .z => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'Z' else 'z');
+                        try kv.iint(self.vt_stream, 'z', v.z);
+                    },
+                }
+            },
+            .transmit_animation_frame => |animation_frame_loading| {
+                try self.vt_stream.print("a={c}", .{'f'});
+
+                if (animation_frame_loading.x != 0) {
+                    try kv.uint(self.vt_stream, 'x', animation_frame_loading.x);
+                }
+                if (animation_frame_loading.y != 0) {
+                    try kv.uint(self.vt_stream, 'y', animation_frame_loading.y);
+                }
+                if (animation_frame_loading.create_frame != 0) {
+                    try kv.uint(self.vt_stream, 'c', animation_frame_loading.create_frame);
+                }
+                if (animation_frame_loading.edit_frame != 0) {
+                    try kv.uint(self.vt_stream, 'r', animation_frame_loading.edit_frame);
+                }
+                if (animation_frame_loading.gap_ms != 0) {
+                    try kv.uint(self.vt_stream, 'z', animation_frame_loading.gap_ms);
+                }
+                switch (animation_frame_loading.composition_mode) {
+                    .alpha_blend => {},
+                    else => |composition_mode| {
+                        try kv.uint(self.vt_stream, 'X', switch (composition_mode) {
+                            .alpha_blend => unreachable,
+                            .overwrite => 1,
+                        });
+                    },
+                }
+                if (@as(u32, @bitCast(animation_frame_loading.background)) != 0) {
+                    try kv.uint(self.vt_stream, 'Y', @bitCast(animation_frame_loading.background));
+                }
+            },
+            .control_animation => |animation_control| {
+                try self.vt_stream.print("a={c}", .{'a'});
+
+                switch (animation_control.action) {
+                    .invalid => {},
+                    else => |action| {
+                        try kv.uint(self.vt_stream, 's', switch (action) {
+                            .invalid => unreachable,
+                            .stop => 1,
+                            .run_wait => 2,
+                            .run => 3,
+                        });
+                    },
+                }
+                if (animation_control.frame != 0) {
+                    try kv.uint(self.vt_stream, 'r', animation_control.frame);
+                }
+                if (animation_control.gap_ms != 0) {
+                    try kv.uint(self.vt_stream, 'z', animation_control.gap_ms);
+                }
+                if (animation_control.current_frame != 0) {
+                    try kv.uint(self.vt_stream, 'c', animation_control.current_frame);
+                }
+                if (animation_control.loops != 0) {
+                    try kv.uint(self.vt_stream, 'v', animation_control.loops);
+                }
+            },
+            .compose_animation => |animation_frame_composition| {
+                try self.vt_stream.print("a={c}", .{'c'});
+
+                if (animation_frame_composition.frame != 0) {
+                    try kv.uint(self.vt_stream, 'c', animation_frame_composition.frame);
+                }
+                if (animation_frame_composition.edit_frame != 0) {
+                    try kv.uint(self.vt_stream, 'r', animation_frame_composition.edit_frame);
+                }
+                if (animation_frame_composition.x != 0) {
+                    try kv.uint(self.vt_stream, 'x', animation_frame_composition.x);
+                }
+                if (animation_frame_composition.y != 0) {
+                    try kv.uint(self.vt_stream, 'y', animation_frame_composition.y);
+                }
+                if (animation_frame_composition.width != 0) {
+                    try kv.uint(self.vt_stream, 'w', animation_frame_composition.width);
+                }
+                if (animation_frame_composition.height != 0) {
+                    try kv.uint(self.vt_stream, 'h', animation_frame_composition.height);
+                }
+                if (animation_frame_composition.left_edge != 0) {
+                    try kv.uint(self.vt_stream, 'X', animation_frame_composition.left_edge);
+                }
+                if (animation_frame_composition.top_edge != 0) {
+                    try kv.uint(self.vt_stream, 'Y', animation_frame_composition.top_edge);
+                }
+                switch (animation_frame_composition.composition_mode) {
+                    .alpha_blend => {},
+                    else => |composition_mode| {
+                        try kv.uint(self.vt_stream, 'C', switch (composition_mode) {
+                            .alpha_blend => unreachable,
+                            .overwrite => 1,
+                        });
+                    },
+                }
+            },
+        }
+
+        if (cmd.transmission()) |transmission| {
+            switch (transmission.format) {
+                .rgba => {},
+                else => |format| {
+                    try kv.uint(self.vt_stream, 'f', switch (format) {
+                        .rgba => unreachable,
+                        .rgb => 24,
+                        .png => 100,
+                        // The parser only accepts the wire values above, so these
+                        // can never result from parsing a command.
+                        .gray, .gray_alpha => unreachable,
+                    });
+                },
+            }
+            switch (transmission.medium) {
+                .direct => {},
+                else => |medium| {
+                    try kv.chr(self.vt_stream, 't', switch (medium) {
+                        .direct => unreachable,
+                        .file => 'f',
+                        .temporary_file => 't',
+                        .shared_memory => 's',
+                    });
+                },
+            }
+            if (transmission.width != 0) {
+                try kv.uint(self.vt_stream, 's', transmission.width);
+            }
+            if (transmission.height != 0) {
+                try kv.uint(self.vt_stream, 'v', transmission.height);
+            }
+            if (transmission.size != 0) {
+                try kv.uint(self.vt_stream, 'S', transmission.size);
+            }
+            if (transmission.offset != 0) {
+                try kv.uint(self.vt_stream, 'O', transmission.offset);
+            }
+            if (transmission.image_id != 0) {
+                try kv.uint(self.vt_stream, 'i', transmission.image_id);
+            }
+            if (transmission.image_number != 0) {
+                try kv.uint(self.vt_stream, 'I', transmission.image_number);
+            }
+            if (transmission.placement_id != 0) {
+                try kv.uint(self.vt_stream, 'p', transmission.placement_id);
+            }
+            switch (transmission.compression) {
+                .none => {},
+                else => |compression| {
+                    try kv.chr(self.vt_stream, 'o', switch (compression) {
+                        .none => unreachable,
+                        .zlib_deflate => 'z',
+                    });
+                },
+            }
+            if (transmission.more_chunks) {
+                try kv.uint(self.vt_stream, 'm', 1);
+            }
+            if (@as(u32, @bitCast(transmission.usage)) != 0) {
+                try kv.uint(self.vt_stream, 'N', @bitCast(transmission.usage));
+            }
+        }
+
+        if (cmd.display()) |display| {
+            if (display.image_id != 0) {
+                try kv.uint(self.vt_stream, 'i', display.image_id);
+            }
+            if (display.image_number != 0) {
+                try kv.uint(self.vt_stream, 'I', display.image_number);
+            }
+            if (display.placement_id != 0) {
+                try kv.uint(self.vt_stream, 'p', display.placement_id);
+            }
+            if (display.x != 0) {
+                try kv.uint(self.vt_stream, 'x', display.x);
+            }
+            if (display.y != 0) {
+                try kv.uint(self.vt_stream, 'y', display.y);
+            }
+            if (display.width != 0) {
+                try kv.uint(self.vt_stream, 'w', display.width);
+            }
+            if (display.height != 0) {
+                try kv.uint(self.vt_stream, 'h', display.height);
+            }
+            if (display.x_offset != 0) {
+                try kv.uint(self.vt_stream, 'X', display.x_offset);
+            }
+            if (display.y_offset != 0) {
+                try kv.uint(self.vt_stream, 'Y', display.y_offset);
+            }
+            if (display.columns != 0) {
+                try kv.uint(self.vt_stream, 'c', display.columns);
+            }
+            if (display.rows != 0) {
+                try kv.uint(self.vt_stream, 'r', display.rows);
+            }
+            switch (display.cursor_movement) {
+                .after => {},
+                else => |cursor_movement| {
+                    try kv.uint(self.vt_stream, 'C', switch (cursor_movement) {
+                        .after => unreachable,
+                        .none => 1,
+                    });
+                },
+            }
+            if (display.virtual_placement) {
+                try kv.uint(self.vt_stream, 'U', 1);
+            }
+            if (display.parent_id != 0) {
+                try kv.uint(self.vt_stream, 'P', display.parent_id);
+            }
+            if (display.parent_placement_id != 0) {
+                try kv.uint(self.vt_stream, 'Q', display.parent_placement_id);
+            }
+            if (display.horizontal_offset != 0) {
+                try kv.iint(self.vt_stream, 'H', display.horizontal_offset);
+            }
+            if (display.vertical_offset != 0) {
+                try kv.iint(self.vt_stream, 'V', display.vertical_offset);
+            }
+            if (display.z != 0) {
+                try kv.iint(self.vt_stream, 'z', display.z);
+            }
+        }
+
+        try self.vt_stream.writeAll(",q=2;");
+        try std.base64.standard.Encoder.encodeWriter(self.vt_stream, cmd.data);
+        try self.vt_stream.writeAll("\x1b\\");
     }
 };
