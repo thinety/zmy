@@ -61,6 +61,7 @@ const csi = struct {
 pub const Handler = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
+    seen_client_ids: std.ArrayList([16]u8),
     pty: *std.Io.Writer,
     vt_stream: *std.Io.Writer,
     terminal: *Terminal,
@@ -80,16 +81,22 @@ pub const Handler = struct {
         return .{
             .gpa = gpa,
             .io = io,
+            .seen_client_ids = .empty,
             .pty = pty,
             .vt_stream = vt_stream,
             .terminal = terminal,
-            .apc_handler = .{},
+            .apc_handler = .{
+                // we need it for our custom APC sequences
+                .unknown_max_bytes = 256,
+            },
             .dcs_handler = .{},
         };
     }
 
     pub fn deinit(self: *Handler) void {
         self.apc_handler.deinit();
+        self.seen_client_ids.deinit(self.gpa);
+        self.* = undefined;
     }
 
     pub fn resize(self: *Handler, value: Terminal.Resize) !void {
@@ -1042,6 +1049,10 @@ pub const Handler = struct {
                             return error.ApcTruncated;
                         }
 
+                        self.handleZmyApc(unknown.content) catch |err| {
+                            std.log.warn("error handling ZMY apc sequence err={}", .{err});
+                        };
+
                         try self.vt_stream.print("\x1b_{s}\x1b\\", .{unknown.content});
                     },
                     .kitty => |*kitty_cmd| {
@@ -1238,6 +1249,23 @@ pub const Handler = struct {
             tag.value,
             if (enabled) "h" else "l",
         });
+    }
+
+    fn handleZmyApc(self: *Handler, content: []const u8) !void {
+        const zmy_prefix = "zmy;";
+        if (!std.mem.startsWith(u8, content, zmy_prefix)) return;
+        const payload = content[zmy_prefix.len..];
+
+        const client_id_prefix = "client_id=";
+        if (std.mem.startsWith(u8, payload, client_id_prefix)) {
+            const encoded_client_id = payload[client_id_prefix.len..];
+
+            var client_id: [16]u8 = undefined;
+            const result = try std.fmt.hexToBytes(&client_id, encoded_client_id);
+            if (result.len != client_id.len) return error.InvalidClientId;
+
+            try self.seen_client_ids.append(self.gpa, client_id);
+        }
     }
 
     /// Re-encode a parsed kitty graphics command back to the wire format

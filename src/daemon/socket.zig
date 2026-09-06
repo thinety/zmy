@@ -36,17 +36,19 @@ pub fn handleClient_(
     message_queue: *std.Io.Queue(ipc.DaemonMessage),
     event_queue: *std.Io.Queue(daemon.Event),
 ) !void {
+    defer {
+        message_queue.close(io);
+
+        const event: daemon.Event = .{ .client_disconnected = client };
+        event_queue.putOneUncancelable(io, event) catch |err| switch (err) {
+            error.Closed => unreachable,
+        };
+    }
+
     try try async.race(io, .{
         .{ readSocket, .{ gpa, io, stream, event_queue, client } },
         .{ writeSocket, .{ gpa, io, message_queue, stream } },
     });
-
-    message_queue.close(io);
-
-    const event: daemon.Event = .{ .client_disconnected = client };
-    event_queue.putOneUncancelable(io, event) catch |err| switch (err) {
-        error.Closed => unreachable,
-    };
 }
 
 fn readSocket(
