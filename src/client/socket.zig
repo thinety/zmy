@@ -30,10 +30,20 @@ pub fn writeSocket(
     io: std.Io,
     message_queue: *std.Io.Queue(ipc.ClientMessage),
     stream: std.Io.net.Stream,
+    initial_message: ipc.ClientInitialMessage,
 ) !void {
     var buffer: [8192]u8 = undefined;
     var stream_writer = stream.writer(io, &buffer);
     const writer = &stream_writer.interface;
+
+    initial_message.serialize(writer) catch |err| switch (err) {
+        error.WriteFailed => return stream_writer.err.?,
+        else => |e| return e,
+    };
+    writer.flush() catch |err| switch (err) {
+        error.WriteFailed => return stream_writer.err.?,
+        else => |e| return e,
+    };
 
     while (true) {
         var message = try message_queue.getOne(io);

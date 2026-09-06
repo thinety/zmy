@@ -1,6 +1,7 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const constants = @import("constants");
+const ipc = @import("../../ipc.zig");
 const terminfo = @import("terminfo.zig");
 
 const Terminal = ghostty_vt.Terminal;
@@ -61,7 +62,7 @@ const csi = struct {
 pub const Handler = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
-    seen_client_ids: std.ArrayList([16]u8),
+    detach_requests: std.ArrayList(ipc.ClientId),
     pty: *std.Io.Writer,
     vt_stream: *std.Io.Writer,
     terminal: *Terminal,
@@ -81,7 +82,7 @@ pub const Handler = struct {
         return .{
             .gpa = gpa,
             .io = io,
-            .seen_client_ids = .empty,
+            .detach_requests = .empty,
             .pty = pty,
             .vt_stream = vt_stream,
             .terminal = terminal,
@@ -95,7 +96,7 @@ pub const Handler = struct {
 
     pub fn deinit(self: *Handler) void {
         self.apc_handler.deinit();
-        self.seen_client_ids.deinit(self.gpa);
+        self.detach_requests.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -1256,15 +1257,15 @@ pub const Handler = struct {
         if (!std.mem.startsWith(u8, content, zmy_prefix)) return;
         const payload = content[zmy_prefix.len..];
 
-        const client_id_prefix = "client_id=";
-        if (std.mem.startsWith(u8, payload, client_id_prefix)) {
-            const encoded_client_id = payload[client_id_prefix.len..];
+        const detach_prefix = "detach;client_id=";
+        if (std.mem.startsWith(u8, payload, detach_prefix)) {
+            const encoded_client_id = payload[detach_prefix.len..];
 
-            var client_id: [16]u8 = undefined;
+            var client_id: ipc.ClientId = undefined;
             const result = try std.fmt.hexToBytes(&client_id, encoded_client_id);
             if (result.len != client_id.len) return error.InvalidClientId;
 
-            try self.seen_client_ids.append(self.gpa, client_id);
+            try self.detach_requests.append(self.gpa, client_id);
         }
     }
 

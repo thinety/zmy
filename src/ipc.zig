@@ -7,6 +7,32 @@ pub const Winsize = struct {
     ypixel: u16,
 };
 
+pub const ClientInitialMessage = struct {
+    winsize: Winsize,
+
+    pub fn serialize(value: *const ClientInitialMessage, writer: *std.Io.Writer) !void {
+        try writer.writeInt(u16, value.winsize.col, .little);
+        try writer.writeInt(u16, value.winsize.row, .little);
+        try writer.writeInt(u16, value.winsize.xpixel, .little);
+        try writer.writeInt(u16, value.winsize.ypixel, .little);
+    }
+
+    pub fn deserialize(reader: *std.Io.Reader) !ClientInitialMessage {
+        const col = try reader.takeInt(u16, .little);
+        const row = try reader.takeInt(u16, .little);
+        const xpixel = try reader.takeInt(u16, .little);
+        const ypixel = try reader.takeInt(u16, .little);
+        return .{
+            .winsize = .{
+                .col = col,
+                .row = row,
+                .xpixel = xpixel,
+                .ypixel = ypixel,
+            },
+        };
+    }
+};
+
 pub const ClientMessage = union(enum(u8)) {
     resize: Winsize,
     data: []u8,
@@ -67,6 +93,24 @@ pub const ClientMessage = union(enum(u8)) {
                 return .{ .data = data };
             },
         }
+    }
+};
+
+pub const ClientId = [16]u8;
+
+pub const DaemonInitialMessage = struct {
+    client_id: ClientId,
+
+    pub fn serialize(value: *const DaemonInitialMessage, writer: *std.Io.Writer) !void {
+        try writer.writeAll(&value.client_id);
+    }
+
+    pub fn deserialize(reader: *std.Io.Reader) !DaemonInitialMessage {
+        var client_id: ClientId = undefined;
+        try reader.readSliceAll(&client_id);
+        return .{
+            .client_id = client_id,
+        };
     }
 };
 
