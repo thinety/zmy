@@ -96,24 +96,6 @@ pub const ClientMessage = union(enum(u8)) {
     }
 };
 
-pub const ClientId = [16]u8;
-
-pub const DaemonInitialMessage = struct {
-    client_id: ClientId,
-
-    pub fn serialize(value: *const DaemonInitialMessage, writer: *std.Io.Writer) !void {
-        try writer.writeAll(&value.client_id);
-    }
-
-    pub fn deserialize(reader: *std.Io.Reader) !DaemonInitialMessage {
-        var client_id: ClientId = undefined;
-        try reader.readSliceAll(&client_id);
-        return .{
-            .client_id = client_id,
-        };
-    }
-};
-
 pub const DaemonMessage = union(enum(u0)) {
     data: []u8,
 
