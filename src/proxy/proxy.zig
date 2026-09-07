@@ -115,18 +115,18 @@ fn remoteToLocal(
                 error.ReadFailed => return stream_reader.err.?,
                 else => |e| return e,
             };
-
-            const data = buffer[0..n];
-            log.info("remote -> local: data.len={} data={b64}{s}", .{
-                data.len,
-                data[0..@min(data.len, 48)],
-                if (data.len > 48) "..." else "",
-            });
-
-            writer.writeAll(data) catch |err| switch (err) {
-                error.WriteFailed => return stream_writer.err.?,
-            };
         }
+
+        const data = buffer[0..n];
+        log.info("remote -> local: data.len={} data={b64}{s}", .{
+            data.len,
+            data[0..@min(data.len, 48)],
+            if (data.len > 48) "..." else "",
+        });
+
+        writer.writeAll(data) catch |err| switch (err) {
+            error.WriteFailed => return stream_writer.err.?,
+        };
     }
 }
 
@@ -151,18 +151,17 @@ fn localToRemote(
                 error.ReadFailed => return stream_reader.err.?,
                 else => |e| return e,
             };
-
-            const data = buffer[0..n];
-            log.info("local -> remote: data.len={} data={b64}{s}", .{
-                data.len,
-                data[0..@min(data.len, 48)],
-                if (data.len > 48) "..." else "",
-            });
-
-            writer.writeAll(data) catch |err| switch (err) {
-                error.WriteFailed => return stream_writer.err.?,
-                else => |e| return e,
-            };
         }
+
+        const data = buffer[0..n];
+        log.info("local -> remote: data.len={} data={b64}{s}", .{
+            data.len,
+            data[0..@min(data.len, 48)],
+            if (data.len > 48) "..." else "",
+        });
+
+        writer.writeAll(data) catch |err| switch (err) {
+            error.WriteFailed => return stream_writer.err.?,
+        };
     }
 }

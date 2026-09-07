@@ -88,6 +88,16 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
+    if (std.mem.eql(u8, cmd, "detach")) {
+        const client_id = args.next() orelse return help(io);
+
+        return runDetach(io, client_id);
+    }
+
+    if (std.mem.eql(u8, cmd, "trace")) {
+        return runTrace(io);
+    }
+
     return help(io);
 }
 
@@ -101,7 +111,9 @@ fn help(io: std.Io) !void {
         \\  attach <session-name>                           Attach to session, creating if needed
         \\  connect <destination> <port> <session-name>     Attach to remote session
         \\  daemon <session-name>                           Runs the daemon process
+        \\  detach <client-id>                              Detach the specified client
         \\  proxy <address> <port>                          Runs the proxy process
+        \\  trace                                           Print all client IDs
         \\  help                                            Show this help
         \\
     ;
@@ -164,7 +176,7 @@ fn runAttach(
     const stream = try connectToSocket(gpa, io, rundir, session_name);
     defer stream.close(io);
 
-    try client.run(gpa, io, stream);
+    try client.run(gpa, io, stream, session_name);
 }
 
 fn runConnect(
@@ -199,7 +211,41 @@ fn runConnect(
         try writer.flush();
     }
 
-    try client.run(gpa, io, stream);
+    try client.run(gpa, io, stream, session_name);
+}
+
+fn runDetach(
+    io: std.Io,
+    client_id: []const u8,
+) !void {
+    var buffer: [256]u8 = undefined;
+    var stdout_file_writer = std.Io.File.stdout().writer(io, &buffer);
+    const stdout_writer = &stdout_file_writer.interface;
+
+    stdout_writer.print(
+        "\x1b_zmy;detach;client_id={s}\x1b\\",
+        .{client_id},
+    ) catch |err| switch (err) {
+        error.WriteFailed => return stdout_file_writer.err.?,
+    };
+    stdout_writer.flush() catch |err| switch (err) {
+        error.WriteFailed => return stdout_file_writer.err.?,
+    };
+}
+
+fn runTrace(
+    io: std.Io,
+) !void {
+    var buffer: [256]u8 = undefined;
+    var stdout_file_writer = std.Io.File.stdout().writer(io, &buffer);
+    const stdout_writer = &stdout_file_writer.interface;
+
+    stdout_writer.writeAll("\x1b_zmy;trace\x1b\\") catch |err| switch (err) {
+        error.WriteFailed => return stdout_file_writer.err.?,
+    };
+    stdout_writer.flush() catch |err| switch (err) {
+        error.WriteFailed => return stdout_file_writer.err.?,
+    };
 }
 
 pub fn connectToSocket(

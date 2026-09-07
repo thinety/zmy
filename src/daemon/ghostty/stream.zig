@@ -1,7 +1,6 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const constants = @import("constants");
-const ipc = @import("../../ipc.zig");
 const terminfo = @import("terminfo.zig");
 
 const Terminal = ghostty_vt.Terminal;
@@ -62,7 +61,6 @@ const csi = struct {
 pub const Handler = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
-    detach_requests: std.ArrayList(ipc.ClientId),
     pty: *std.Io.Writer,
     vt_stream: *std.Io.Writer,
     terminal: *Terminal,
@@ -82,7 +80,6 @@ pub const Handler = struct {
         return .{
             .gpa = gpa,
             .io = io,
-            .detach_requests = .empty,
             .pty = pty,
             .vt_stream = vt_stream,
             .terminal = terminal,
@@ -96,7 +93,6 @@ pub const Handler = struct {
 
     pub fn deinit(self: *Handler) void {
         self.apc_handler.deinit();
-        self.detach_requests.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -1049,11 +1045,6 @@ pub const Handler = struct {
                         if (unknown.truncated) {
                             return error.ApcTruncated;
                         }
-
-                        self.handleZmyApc(unknown.content) catch |err| {
-                            std.log.warn("error handling ZMY apc sequence err={}", .{err});
-                        };
-
                         try self.vt_stream.print("\x1b_{s}\x1b\\", .{unknown.content});
                     },
                     .kitty => |*kitty_cmd| {
@@ -1250,23 +1241,6 @@ pub const Handler = struct {
             tag.value,
             if (enabled) "h" else "l",
         });
-    }
-
-    fn handleZmyApc(self: *Handler, content: []const u8) !void {
-        const zmy_prefix = "zmy;";
-        if (!std.mem.startsWith(u8, content, zmy_prefix)) return;
-        const payload = content[zmy_prefix.len..];
-
-        const detach_prefix = "detach;client_id=";
-        if (std.mem.startsWith(u8, payload, detach_prefix)) {
-            const encoded_client_id = payload[detach_prefix.len..];
-
-            var client_id: ipc.ClientId = undefined;
-            const result = try std.fmt.hexToBytes(&client_id, encoded_client_id);
-            if (result.len != client_id.len) return error.InvalidClientId;
-
-            try self.detach_requests.append(self.gpa, client_id);
-        }
     }
 
     /// Re-encode a parsed kitty graphics command back to the wire format

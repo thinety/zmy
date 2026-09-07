@@ -10,7 +10,6 @@ pub fn handleClient(
     io: std.Io,
     stream: std.Io.net.Stream,
     client: *anyopaque,
-    initial_message: ipc.DaemonInitialMessage,
     message_queue: *std.Io.Queue(ipc.DaemonMessage),
     event_queue: *std.Io.Queue(daemon.Event),
 ) void {
@@ -19,7 +18,6 @@ pub fn handleClient(
         io,
         stream,
         client,
-        initial_message,
         message_queue,
         event_queue,
     ) catch |err| switch (err) {
@@ -35,7 +33,6 @@ pub fn handleClient_(
     io: std.Io,
     stream: std.Io.net.Stream,
     client: *anyopaque,
-    initial_message: ipc.DaemonInitialMessage,
     message_queue: *std.Io.Queue(ipc.DaemonMessage),
     event_queue: *std.Io.Queue(daemon.Event),
 ) !void {
@@ -52,7 +49,7 @@ pub fn handleClient_(
 
     try try async.race(io, .{
         .{ readSocket, .{ gpa, io, stream, event_queue, client } },
-        .{ writeSocket, .{ gpa, io, message_queue, stream, initial_message } },
+        .{ writeSocket, .{ gpa, io, message_queue, stream } },
     });
 }
 
@@ -101,20 +98,10 @@ fn writeSocket(
     io: std.Io,
     message_queue: *std.Io.Queue(ipc.DaemonMessage),
     stream: std.Io.net.Stream,
-    initial_message: ipc.DaemonInitialMessage,
 ) !void {
     var buffer: [8192]u8 = undefined;
     var stream_writer = stream.writer(io, &buffer);
     const writer = &stream_writer.interface;
-
-    initial_message.serialize(writer) catch |err| switch (err) {
-        error.WriteFailed => return stream_writer.err.?,
-        else => |e| return e,
-    };
-    writer.flush() catch |err| switch (err) {
-        error.WriteFailed => return stream_writer.err.?,
-        else => |e| return e,
-    };
 
     while (true) {
         var message = try message_queue.getOne(io);

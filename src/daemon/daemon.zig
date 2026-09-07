@@ -108,7 +108,6 @@ fn acceptLoop(
 
 const Client = struct {
     node: std.DoublyLinkedList.Node = .{},
-    id: ipc.ClientId,
     winsize: ?ipc.Winsize,
     stream: std.Io.net.Stream,
     message_queue_buffer: [8]ipc.DaemonMessage = undefined,
@@ -182,7 +181,6 @@ fn mainLoop(
                 const client = try gpa.create(Client);
                 errdefer gpa.destroy(client);
 
-                io.random(&client.id);
                 client.winsize = null;
                 client.stream = stream;
 
@@ -194,10 +192,6 @@ fn mainLoop(
                         message.deinit(gpa);
                     }
                 }
-
-                const initial_message: ipc.DaemonInitialMessage = .{
-                    .client_id = client.id,
-                };
                 client.task = try io.concurrent(
                     socket_mod.handleClient,
                     .{
@@ -205,7 +199,6 @@ fn mainLoop(
                         io,
                         stream,
                         client,
-                        initial_message,
                         &client.message_queue,
                         event_queue,
                     },
@@ -220,6 +213,17 @@ fn mainLoop(
 
                 std.debug.assert(client.winsize == null);
                 client.winsize = payload.message.winsize;
+
+                try doResize(
+                    gpa,
+                    io,
+                    clients,
+                    &vt_stream_handler,
+                    pty,
+                    last_winsize,
+                    &pty_buffer,
+                    ptyin_queue,
+                );
 
                 var allocating: std.Io.Writer.Allocating = .init(gpa);
                 defer allocating.deinit();
@@ -249,15 +253,16 @@ fn mainLoop(
                         const client: *Client = @ptrCast(@alignCast(payload.client));
                         client.winsize = winsize;
 
-                        try doResize(clients, &vt_stream_handler, pty, last_winsize);
-                        if (pty_buffer.written().len > 0) {
-                            defer pty_buffer.clearRetainingCapacity();
-
-                            const ptyin_data = try gpa.dupe(u8, pty_buffer.written());
-                            errdefer gpa.free(ptyin_data);
-
-                            try ptyin_queue.putOne(io, ptyin_data);
-                        }
+                        try doResize(
+                            gpa,
+                            io,
+                            clients,
+                            &vt_stream_handler,
+                            pty,
+                            last_winsize,
+                            &pty_buffer,
+                            ptyin_queue,
+                        );
                     },
                     .data => |data| {
                         errdefer gpa.free(data);
@@ -296,15 +301,16 @@ fn mainLoop(
                 client.deinit(gpa, io);
                 gpa.destroy(client);
 
-                try doResize(clients, &vt_stream_handler, pty, last_winsize);
-                if (pty_buffer.written().len > 0) {
-                    defer pty_buffer.clearRetainingCapacity();
-
-                    const ptyin_data = try gpa.dupe(u8, pty_buffer.written());
-                    errdefer gpa.free(ptyin_data);
-
-                    try ptyin_queue.putOne(io, ptyin_data);
-                }
+                try doResize(
+                    gpa,
+                    io,
+                    clients,
+                    &vt_stream_handler,
+                    pty,
+                    last_winsize,
+                    &pty_buffer,
+                    ptyin_queue,
+                );
             },
             .ptyout => |data| {
                 defer gpa.free(data);
@@ -316,22 +322,8 @@ fn mainLoop(
 
                 vt_stream.nextSlice(data);
 
-                for (vt_stream_handler.detach_requests.items) |*client_id| {
-                    var it = clients.first;
-                    while (it) |node| : (it = node.next) {
-                        const client: *Client = @fieldParentPtr("node", node);
-
-                        if (std.mem.eql(u8, client_id, &client.id)) {
-                            client.message_queue.close(io);
-                        }
-                    }
-                }
-                vt_stream_handler.detach_requests.clearRetainingCapacity();
-
                 if (pty_buffer.written().len > 0) {
-                    defer pty_buffer.clearRetainingCapacity();
-
-                    const ptyin_data = try gpa.dupe(u8, pty_buffer.written());
+                    const ptyin_data = try pty_buffer.toOwnedSlice();
                     errdefer gpa.free(ptyin_data);
 
                     try ptyin_queue.putOne(io, ptyin_data);
@@ -373,10 +365,14 @@ fn mainLoop(
 }
 
 fn doResize(
+    gpa: std.mem.Allocator,
+    io: std.Io,
     clients: std.DoublyLinkedList,
     vt_stream_handler: *stream_mod.Handler,
     pty: std.Io.File,
     last_winsize: *ipc.Winsize,
+    pty_buffer: *std.Io.Writer.Allocating,
+    ptyin_queue: *std.Io.Queue([]u8),
 ) !void {
     var optional_final_winsize: ?ipc.Winsize = null;
 
@@ -429,6 +425,15 @@ fn doResize(
             log.err("ioctl({}, T.IOCSWINSZ) failed: {t}", .{ pty.handle, err });
             return error.Ioctl;
         },
+    }
+
+    if (pty_buffer.written().len > 0) {
+        defer pty_buffer.clearRetainingCapacity();
+
+        const ptyin_data = try gpa.dupe(u8, pty_buffer.written());
+        errdefer gpa.free(ptyin_data);
+
+        try ptyin_queue.putOne(io, ptyin_data);
     }
 }
 

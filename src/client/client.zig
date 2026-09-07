@@ -3,6 +3,7 @@ const async = @import("../async.zig");
 const ipc = @import("../ipc.zig");
 const socket = @import("socket.zig");
 const stdio = @import("stdio.zig");
+const ApcParser = @import("ApcParser.zig");
 
 const log = std.log.scoped(.zmy_client);
 
@@ -27,10 +28,13 @@ pub const Event = union(enum) {
     }
 };
 
+pub const ClientId = [16]u8;
+
 pub fn run(
     gpa: std.mem.Allocator,
     io: std.Io,
     stream: std.Io.net.Stream,
+    session_name: []const u8,
 ) !void {
     try closeStderrIfTty();
     defer {
@@ -111,32 +115,8 @@ pub fn run(
         }
     }
 
-    // parse the initial message before entering the read loop below
-    const client_id: ipc.ClientId = client_id: {
-        var stream_reader = stream.reader(io, &.{});
-        const reader = &stream_reader.interface;
-
-        const message = ipc.DaemonInitialMessage.deserialize(reader) catch |err| switch (err) {
-            error.ReadFailed => return stream_reader.err.?,
-            else => |e| return e,
-        };
-
-        break :client_id message.client_id;
-    };
-    // our loop detection mechanism: we ask to be detached from the daemon
-    // *downstream* from us by sending a detach request *upstream*. if this
-    // request hits the correct daemon, that means we just closed the loop
-    // and should detach immediately.
-    {
-        const data = try std.fmt.allocPrint(
-            gpa,
-            "\x1b_zmy;detach;client_id={x}\x1b\\",
-            .{&client_id},
-        );
-        errdefer gpa.free(data);
-
-        try stdout_queue.putOne(io, data);
-    }
+    var client_id: ClientId = undefined;
+    io.random(&client_id);
 
     const initial_message: ipc.ClientInitialMessage = .{
         .winsize = try getWinsize(),
@@ -176,7 +156,7 @@ pub fn run(
         .{ socket.readSocket, .{ gpa, io, stream, &event_queue } },
         .{ socket.writeSocket, .{ gpa, io, &message_queue, stream, initial_message } },
         .{ readSignals, .{ io, signals, &event_queue } },
-        .{ mainLoop, .{ gpa, io, &event_queue, &stdout_queue, &message_queue } },
+        .{ mainLoop, .{ gpa, io, &event_queue, &stdout_queue, &message_queue, session_name, client_id } },
     });
 }
 
@@ -214,7 +194,32 @@ fn mainLoop(
     event_queue: *std.Io.Queue(Event),
     stdout_queue: *std.Io.Queue([]u8),
     message_queue: *std.Io.Queue(ipc.ClientMessage),
+    session_name: []const u8,
+    client_id: ClientId,
 ) !void {
+    // our loop detection mechanism: we ask to be detached and use our own id.
+    // if this request hits us again, that means we just closed the loop and
+    // should detach immediately.
+    {
+        const data = try std.fmt.allocPrint(
+            gpa,
+            "\x1b_zmy;detach;client_id={x}\x1b\\",
+            .{&client_id},
+        );
+        errdefer gpa.free(data);
+
+        try stdout_queue.putOne(io, data);
+    }
+
+    var forwarder_buffer: std.Io.Writer.Allocating = .init(gpa);
+    defer forwarder_buffer.deinit();
+
+    var apc_parser: ApcParser = .init(
+        &forwarder_buffer.writer,
+        session_name,
+        client_id,
+    );
+
     while (true) {
         const event = try event_queue.getOne(io);
         switch (event) {
@@ -230,14 +235,22 @@ fn mainLoop(
             .daemon_message => |message| {
                 switch (message) {
                     .data => |data| {
-                        errdefer gpa.free(data);
+                        defer gpa.free(data);
                         log.info("DaemonMessage.data: data.len={} data={b64}{s}", .{
                             data.len,
                             data[0..@min(data.len, 48)],
                             if (data.len > 48) "..." else "",
                         });
 
-                        try stdout_queue.putOne(io, data);
+                        try apc_parser.nextSlice(data);
+                        if (apc_parser.received_detach) {
+                            break;
+                        }
+
+                        const stdout_data = try forwarder_buffer.toOwnedSlice();
+                        errdefer gpa.free(stdout_data);
+
+                        try stdout_queue.putOne(io, stdout_data);
                     },
                 }
             },
