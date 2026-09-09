@@ -165,7 +165,7 @@ fn mainLoop(
         &vt_stream_buffer.writer,
         &term,
     );
-    var vt_stream = ghostty.Stream(*stream_mod.Handler).init(.{
+    var vt_stream: ghostty.Stream(*stream_mod.Handler) = .init(.{
         .allocator = gpa,
         .handler = &vt_stream_handler,
     });

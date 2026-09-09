@@ -1,8 +1,9 @@
 const std = @import("std");
+const ghostty = @import("ghostty-vt");
 const async = @import("../async.zig");
 const ipc = @import("../ipc.zig");
-const socket = @import("socket.zig");
-const stdio = @import("stdio.zig");
+const socket_mod = @import("socket.zig");
+const stdio_mod = @import("stdio.zig");
 const ApcParser = @import("ApcParser.zig");
 
 const log = std.log.scoped(.zmy_client);
@@ -151,10 +152,10 @@ pub fn run(
     defer signals.close(io);
 
     try try async.race(io, .{
-        .{ stdio.readStdin, .{ gpa, io, &event_queue } },
-        .{ stdio.writeStdout, .{ gpa, io, &stdout_queue } },
-        .{ socket.readSocket, .{ gpa, io, stream, &event_queue } },
-        .{ socket.writeSocket, .{ gpa, io, &message_queue, stream, initial_message } },
+        .{ stdio_mod.readStdin, .{ gpa, io, &event_queue } },
+        .{ stdio_mod.writeStdout, .{ gpa, io, &stdout_queue } },
+        .{ socket_mod.readSocket, .{ gpa, io, stream, &event_queue } },
+        .{ socket_mod.writeSocket, .{ gpa, io, &message_queue, stream, initial_message } },
         .{ readSignals, .{ io, signals, &event_queue } },
         .{ mainLoop, .{ gpa, io, &event_queue, &stdout_queue, &message_queue, session_name, client_id } },
     });
@@ -203,7 +204,7 @@ fn mainLoop(
     {
         const data = try std.fmt.allocPrint(
             gpa,
-            "\x1b_zmy;detach;client_id={x}\x1b\\",
+            "\x1b_zmy;detach;{x}\x1b\\",
             .{&client_id},
         );
         errdefer gpa.free(data);
@@ -211,11 +212,11 @@ fn mainLoop(
         try stdout_queue.putOne(io, data);
     }
 
-    var forwarder_buffer: std.Io.Writer.Allocating = .init(gpa);
-    defer forwarder_buffer.deinit();
+    var vt_stream_buffer: std.Io.Writer.Allocating = .init(gpa);
+    defer vt_stream_buffer.deinit();
 
     var apc_parser: ApcParser = .init(
-        &forwarder_buffer.writer,
+        &vt_stream_buffer.writer,
         session_name,
         client_id,
     );
@@ -247,10 +248,12 @@ fn mainLoop(
                             break;
                         }
 
-                        const stdout_data = try forwarder_buffer.toOwnedSlice();
-                        errdefer gpa.free(stdout_data);
+                        if (vt_stream_buffer.written().len > 0) {
+                            const stdout_data = try vt_stream_buffer.toOwnedSlice();
+                            errdefer gpa.free(stdout_data);
 
-                        try stdout_queue.putOne(io, stdout_data);
+                            try stdout_queue.putOne(io, stdout_data);
+                        }
                     },
                 }
             },
