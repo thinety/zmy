@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const constants = b.addOptions();
-    constants.addOption([:0]const u8, "TERM", "xterm-zmy");
+    constants.addOption([:0]const u8, "TERM", "xterm-ghostty");
     constants.addOption([:0]const u8, "PROGRAM_NAME", @tagName(@import("build.zig.zon").name));
     constants.addOption([:0]const u8, "PROGRAM_VERSION", @import("build.zig.zon").version);
     exe_mod.addOptions("constants", constants);
