@@ -1,23 +1,8 @@
 const std = @import("std");
-const ghostty_vt = @import("ghostty-vt");
-
-const Terminal = ghostty_vt.Terminal;
-const Screen = ghostty_vt.Screen;
-const PageList = ghostty_vt.PageList;
-const Page = ghostty_vt.Page;
-const Coordinate = ghostty_vt.Coordinate;
-const Style = ghostty_vt.Style;
-const Row = ghostty_vt.page.Row;
-const Cell = ghostty_vt.page.Cell;
-const modes = ghostty_vt.modes;
-const kitty = ghostty_vt.kitty;
-const charsets = struct {
-    const Slots = ghostty_vt.CharsetSlot;
-};
-const size = ghostty_vt.size;
+const ghostty = @import("ghostty-vt");
 
 pub fn formatTerminal(
-    terminal: *const Terminal,
+    terminal: *const ghostty.Terminal,
     writer: *std.Io.Writer,
 ) std.Io.Writer.Error!void {
     // reset terminal
@@ -28,15 +13,15 @@ pub fn formatTerminal(
     // simplicity we just emit them all before. If we make this more complex
     // later we should add test cases for it.
     {
-        inline for (@typeInfo(modes.Mode).@"enum".fields) |field| {
-            const mode: modes.Mode = @enumFromInt(field.value);
+        inline for (@typeInfo(ghostty.modes.Mode).@"enum".fields) |field| {
+            const mode: ghostty.modes.Mode = @enumFromInt(field.value);
             if (mode == .in_band_size_reports) continue;
             if (mode == .report_visibility) continue;
             const current = terminal.modes.get(mode);
             const default_val = @field(terminal.modes.default, field.name);
 
             if (current != default_val) {
-                const tag: modes.ModeTag = @bitCast(@intFromEnum(mode));
+                const tag: ghostty.modes.ModeTag = @bitCast(@intFromEnum(mode));
                 const prefix = if (tag.ansi) "" else "?";
                 const suffix = if (current) "h" else "l";
                 try writer.print("\x1b[{s}{d}{s}", .{ prefix, tag.value, suffix });
@@ -83,8 +68,8 @@ pub fn formatTerminal(
 }
 
 fn formatScreen(
-    terminal: *const Terminal,
-    screen: *const Screen,
+    terminal: *const ghostty.Terminal,
+    screen: *const ghostty.Screen,
     writer: *std.Io.Writer,
 ) std.Io.Writer.Error!void {
     {
@@ -132,7 +117,7 @@ fn formatScreen(
     // Emit Kitty keyboard protocol state using CSI = u
     {
         const current_flags = screen.kitty_keyboard.current();
-        if (current_flags.int() != kitty.KeyFlags.disabled.int()) {
+        if (current_flags.int() != ghostty.kitty.KeyFlags.disabled.int()) {
             const flags = current_flags.int();
             try writer.print("\x1b[={d};1u", .{flags});
         }
@@ -143,7 +128,7 @@ fn formatScreen(
         const charset = &screen.charset;
 
         // Emit G0-G3 designations
-        for (std.enums.values(charsets.Slots)) |slot| {
+        for (std.enums.values(ghostty.CharsetSlot)) |slot| {
             const cs = charset.charsets.get(slot);
             if (cs != .utf8) { // Only emit non-default charsets
                 const intermediate: u8 = switch (slot) {
@@ -206,11 +191,11 @@ fn formatScreen(
 }
 
 fn formatPageList(
-    list: *const PageList,
+    list: *const ghostty.PageList,
     writer: *std.Io.Writer,
 ) std.Io.Writer.Error!void {
-    const tl: PageList.Pin = list.getTopLeft(.screen);
-    const br: PageList.Pin = list.getBottomRight(.screen).?;
+    const tl: ghostty.PageList.Pin = list.getTopLeft(.screen);
+    const br: ghostty.PageList.Pin = list.getBottomRight(.screen).?;
 
     var page_state: TrailingState = .empty;
     var iter = tl.pageIterator(.right_down, br);
@@ -237,7 +222,7 @@ const TrailingState = struct {
 };
 
 fn formatPage(
-    page: *const Page,
+    page: *const ghostty.Page,
     /// Start and end points within the page to format. If end x is not given
     /// then it will be the full width. If end y is not given then it will be
     /// the full height.
@@ -251,10 +236,10 @@ fn formatPage(
     /// If start X falls on the second column of a wide character, then
     /// the entire character will be included (as if you specified the
     /// previous column).
-    start_x: size.CellCountInt,
-    start_y: size.CellCountInt,
-    end_x_: ?size.CellCountInt,
-    end_y_: ?size.CellCountInt,
+    start_x: ghostty.size.CellCountInt,
+    start_y: ghostty.size.CellCountInt,
+    end_x_: ?ghostty.size.CellCountInt,
+    end_y_: ?ghostty.size.CellCountInt,
     /// Trailing state. This is used to ensure that rows wrapped across
     /// multiple pages are unwrapped properly, as well as other accounting
     /// we may do in the future.
@@ -275,12 +260,12 @@ fn formatPage(
     // Setup our starting column and perform some validation for overflows.
     // Note: start_x only applies to the first row, end_x only applies to the last row.
     if (start_x >= page.size.cols) return .{ .cells = blank_cells };
-    const end_x_unclamped: size.CellCountInt = end_x_ orelse page.size.cols - 1;
+    const end_x_unclamped: ghostty.size.CellCountInt = end_x_ orelse page.size.cols - 1;
     var end_x = @min(end_x_unclamped, page.size.cols - 1);
 
     // Setup our starting row and perform some validation for overflows.
     if (start_y >= page.size.rows) return .{ .cells = blank_cells };
-    const end_y_unclamped: size.CellCountInt = end_y_ orelse page.size.rows - 1;
+    const end_y_unclamped: ghostty.size.CellCountInt = end_y_ orelse page.size.rows - 1;
     if (start_y > end_y_unclamped) return .{ .cells = blank_cells };
     var end_y = @min(end_y_unclamped, page.size.rows - 1);
 
@@ -312,7 +297,7 @@ fn formatPage(
     }
 
     // Our style for non-plain formats
-    var style: Style = .{};
+    var style: ghostty.Style = .{};
 
     // TODO(thiago): hyperlink
     // Track hyperlink state for HTML output. We need to close </a> tags
@@ -320,9 +305,9 @@ fn formatPage(
     // var current_hyperlink_id: ?hyperlink.Id = null;
 
     for (start_y..end_y + 1) |y_usize| {
-        const y: size.CellCountInt = @intCast(y_usize);
-        const row: *Row = page.getRow(y);
-        const cells: []const Cell = page.getCells(row);
+        const y: ghostty.size.CellCountInt = @intCast(y_usize);
+        const row: *ghostty.page.Row = page.getRow(y);
+        const cells: []const ghostty.page.Cell = page.getCells(row);
 
         // Determine the x range for this row
         // - First row: start_x to end of row (or end_x if single row)
@@ -330,14 +315,14 @@ fn formatPage(
         // - Middle rows: full width
         const cells_subset = cells_subset: {
             // The end is always straightforward
-            const row_end_x: size.CellCountInt = if (y == end_y)
+            const row_end_x: ghostty.size.CellCountInt = if (y == end_y)
                 end_x + 1
             else
                 page.size.cols;
 
             // The first we have to check if our start X falls on the
             // tail of a wide character.
-            const row_start_x: size.CellCountInt = if (start_x > 0 and
+            const row_start_x: ghostty.size.CellCountInt = if (start_x > 0 and
                 (y == start_y))
             start_x: {
                 break :start_x switch (cells[start_x].wide) {
@@ -507,10 +492,10 @@ fn formatPage(
 }
 
 fn writeCell(
-    page: *const Page,
-    comptime tag: Cell.ContentTag,
+    page: *const ghostty.Page,
+    comptime tag: ghostty.page.Cell.ContentTag,
     writer: *std.Io.Writer,
-    cell: *const Cell,
+    cell: *const ghostty.page.Cell,
 ) !void {
     // Blank cells get an empty space that isn't replaced by anything
     // because it isn't really a space. We do this so that formatting
@@ -538,9 +523,9 @@ fn writeCodepoint(
 // Returns the style for the given cell. If there is no styling this
 // will return the default style.
 fn cellStyle(
-    page: *const Page,
-    cell: *const Cell,
-) Style {
+    page: *const ghostty.Page,
+    cell: *const ghostty.page.Cell,
+) ghostty.Style {
     return switch (cell.content_tag) {
         inline .codepoint, .codepoint_grapheme => if (!cell.hasStyling())
             .{}
@@ -570,7 +555,7 @@ fn cellStyle(
 
 fn formatStyleOpen(
     writer: *std.Io.Writer,
-    style: *const Style,
+    style: *const ghostty.Style,
 ) std.Io.Writer.Error!void {
     const formatter = style.formatterVt();
     try writer.print("{f}", .{formatter});

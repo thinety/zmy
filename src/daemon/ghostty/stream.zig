@@ -1,34 +1,7 @@
 const std = @import("std");
-const ghostty_vt = @import("ghostty-vt");
+const ghostty = @import("ghostty-vt");
 const constants = @import("constants");
 const terminfo = @import("terminfo.zig");
-
-const Terminal = ghostty_vt.Terminal;
-const Screen = ghostty_vt.Screen;
-const Action = ghostty_vt.StreamAction;
-const apc = ghostty_vt.apc;
-const dcs = ghostty_vt.dcs;
-const osc = ghostty_vt.osc;
-const size_report = ghostty_vt.size_report;
-const kitty = ghostty_vt.kitty;
-const modes = ghostty_vt.modes;
-const device_status = ghostty_vt.device_status;
-const device_attributes = struct {
-    const Req = Action.Value(.device_attributes);
-    const Attributes = @typeInfo(
-        @typeInfo(
-            @typeInfo(
-                @FieldType(
-                    ghostty_vt.TerminalStream.Handler.Effects,
-                    "device_attributes",
-                ),
-            ).optional.child,
-        ).pointer.child,
-    ).@"fn".return_type.?;
-};
-const csi = struct {
-    const SizeReportStyle = ghostty_vt.SizeReportStyle;
-};
 
 // here is a list of everything that's not forwarded to `self.vt_stream`.
 // you can grep for the comments and read any extra explanations there.
@@ -63,19 +36,16 @@ pub const Handler = struct {
     io: std.Io,
     pty: *std.Io.Writer,
     vt_stream: *std.Io.Writer,
-    terminal: *Terminal,
-    apc_handler: apc.Handler,
-    dcs_handler: dcs.Handler,
-
-    const default_cursor_style: Screen.CursorStyle = .block;
-    const default_cursor_blink: bool = false;
+    terminal: *ghostty.Terminal,
+    apc_handler: ghostty.apc.Handler,
+    dcs_handler: ghostty.dcs.Handler,
 
     pub fn init(
         gpa: std.mem.Allocator,
         io: std.Io,
         pty: *std.Io.Writer,
         vt_stream: *std.Io.Writer,
-        terminal: *Terminal,
+        terminal: *ghostty.Terminal,
     ) Handler {
         return .{
             .gpa = gpa,
@@ -85,7 +55,7 @@ pub const Handler = struct {
             .terminal = terminal,
             .apc_handler = .{
                 // we need it for our custom APC sequences
-                .unknown_max_bytes = 256,
+                .unknown_max_bytes = 4096,
             },
             .dcs_handler = .{},
         };
@@ -96,7 +66,7 @@ pub const Handler = struct {
         self.* = undefined;
     }
 
-    pub fn resize(self: *Handler, value: Terminal.Resize) !void {
+    pub fn resize(self: *Handler, value: ghostty.Terminal.Resize) !void {
         try self.terminal.resize(self.gpa, value);
 
         // Mode 2048 reports require complete, current cell pixel geometry.
@@ -105,7 +75,7 @@ pub const Handler = struct {
         // If we have no in-band size reports enabled then do nothing.
         if (!self.terminal.modes.get(.in_band_size_reports)) return;
 
-        try size_report.encode(self.pty, .mode_2048, .{
+        try ghostty.size_report.encode(self.pty, .mode_2048, .{
             .rows = value.rows,
             .columns = value.cols,
             .cell_width = cell_size.width,
@@ -115,8 +85,8 @@ pub const Handler = struct {
 
     pub fn vt(
         self: *Handler,
-        comptime action: Action.Tag,
-        value: Action.Value(action),
+        comptime action: ghostty.StreamAction.Tag,
+        value: ghostty.StreamAction.Value(action),
     ) void {
         self.vtFallible(action, value) catch |err| {
             std.log.err("error handling VT action action={} err={}", .{ action, err });
@@ -125,8 +95,8 @@ pub const Handler = struct {
 
     inline fn vtFallible(
         self: *Handler,
-        comptime action: Action.Tag,
-        value: Action.Value(action),
+        comptime action: ghostty.StreamAction.Tag,
+        value: ghostty.StreamAction.Value(action),
     ) !void {
         switch (action) {
             .print => {
@@ -857,7 +827,17 @@ pub const Handler = struct {
                 // no_forward(device_attributes): we simply answer the query.
                 // we don't want to forward to avoid multiple answers from
                 // connected clients.
-                const attrs: device_attributes.Attributes = .{};
+                const DeviceAttributes = @typeInfo(
+                    @typeInfo(
+                        @typeInfo(
+                            @FieldType(
+                                ghostty.TerminalStream.Handler.Effects,
+                                "device_attributes",
+                            ),
+                        ).optional.child,
+                    ).pointer.child,
+                ).@"fn".return_type.?;
+                const attrs: DeviceAttributes = .{};
                 try attrs.encode(value, self.pty);
             },
             .device_status => {
@@ -887,7 +867,7 @@ pub const Handler = struct {
                     .color_scheme => {},
 
                     .visibility => {
-                        try device_status.encodeVisibilityReport(
+                        try ghostty.device_status.encodeVisibilityReport(
                             self.pty,
                             if (self.terminal.flags.visible) .potentially_visible else .not_visible,
                         );
@@ -926,13 +906,13 @@ pub const Handler = struct {
                     },
 
                     .csi_14_t, .csi_16_t, .csi_18_t => {
-                        const report_style: size_report.Style = switch (value) {
+                        const report_style: ghostty.size_report.Style = switch (value) {
                             .csi_14_t => .csi_14_t,
                             .csi_16_t => .csi_16_t,
                             .csi_18_t => .csi_18_t,
                             .csi_21_t => unreachable,
                         };
-                        try size_report.encode(self.pty, report_style, .{
+                        try ghostty.size_report.encode(self.pty, report_style, .{
                             .rows = self.terminal.rows,
                             .columns = self.terminal.cols,
                             .cell_width = self.terminal.width_px / self.terminal.cols,
@@ -1010,7 +990,7 @@ pub const Handler = struct {
 
                 switch (cmd) {
                     .decrqss => |request| {
-                        var response: [dcs.Command.DECRQSS.max_response_bytes]u8 = undefined;
+                        var response: [ghostty.dcs.Command.DECRQSS.max_response_bytes]u8 = undefined;
                         const encoded = try request.encode(self.terminal, &response);
                         try self.pty.writeAll(encoded);
                     },
@@ -1047,6 +1027,7 @@ pub const Handler = struct {
                         }
                         try self.vt_stream.print("\x1b_{s}\x1b\\", .{unknown.content});
                     },
+
                     .kitty => |*kitty_cmd| {
                         if (self.terminal.kittyGraphics(
                             self.io,
@@ -1082,7 +1063,7 @@ pub const Handler = struct {
         }
     }
 
-    fn setMode(self: *Handler, mode: modes.Mode, enabled: bool) !void {
+    fn setMode(self: *Handler, mode: ghostty.modes.Mode, enabled: bool) !void {
         // Set the mode on the terminal
         self.terminal.modes.set(mode, enabled);
 
@@ -1141,7 +1122,7 @@ pub const Handler = struct {
             .in_band_size_reports => {
                 // no_forward(in_band_size_reports)
                 if (enabled) {
-                    try size_report.encode(self.pty, .mode_2048, .{
+                    try ghostty.size_report.encode(self.pty, .mode_2048, .{
                         .rows = self.terminal.rows,
                         .columns = self.terminal.cols,
                         .cell_width = self.terminal.width_px / self.terminal.cols,
@@ -1195,11 +1176,11 @@ pub const Handler = struct {
             .report_visibility => {
                 // no_forward(report_visibility)
                 if (enabled) {
-                    const visibility: device_status.Visibility = if (self.terminal.flags.visible)
+                    const visibility: ghostty.device_status.Visibility = if (self.terminal.flags.visible)
                         .potentially_visible
                     else
                         .not_visible;
-                    try device_status.encodeVisibilityReport(self.pty, visibility);
+                    try ghostty.device_status.encodeVisibilityReport(self.pty, visibility);
                 }
             },
 
@@ -1234,8 +1215,8 @@ pub const Handler = struct {
         }
     }
 
-    fn forwardMode(self: *Handler, comptime mode: modes.Mode, enabled: bool) !void {
-        const tag: modes.ModeTag = .fromMode(mode);
+    fn forwardMode(self: *Handler, comptime mode: ghostty.modes.Mode, enabled: bool) !void {
+        const tag: ghostty.modes.ModeTag = .fromMode(mode);
         try self.vt_stream.print("\x1b[{s}{d}{s}", .{
             if (tag.ansi) "" else "?",
             tag.value,
@@ -1249,7 +1230,7 @@ pub const Handler = struct {
     /// parser fills the same defaults for absent keys, so the re-encoded
     /// command is semantically identical.
     /// https://sw.kovidgoyal.net/kitty/graphics-protocol/
-    fn forwardKittyGraphics(self: *Handler, cmd: *const kitty.graphics.Command) !void {
+    fn forwardKittyGraphics(self: *Handler, cmd: *const ghostty.kitty.graphics.Command) !void {
         const kv = struct {
             fn chr(writer: *std.Io.Writer, key: u8, value: u8) !void {
                 try writer.print(",{c}={c}", .{ key, value });

@@ -3,11 +3,11 @@ const client = @import("client.zig");
 
 const Self = @This();
 
-forwarder: *std.Io.Writer,
+vt_stream: *std.Io.Writer,
 session_name: []const u8,
 client_id: client.ClientId,
 received_detach: bool,
-apc_content_buffer: [256]u8,
+apc_content_buffer: [4096]u8,
 apc_content_len: usize,
 state: State,
 
@@ -19,12 +19,12 @@ const State = enum {
 };
 
 pub fn init(
-    forwarder: *std.Io.Writer,
+    vt_stream: *std.Io.Writer,
     session_name: []const u8,
     client_id: client.ClientId,
 ) Self {
     return .{
-        .forwarder = forwarder,
+        .vt_stream = vt_stream,
         .session_name = session_name,
         .client_id = client_id,
         .received_detach = false,
@@ -44,7 +44,7 @@ pub fn nextSlice(self: *Self, input: []const u8) !void {
                     data = data[1..];
                 } else {
                     const i = std.mem.indexOf(u8, data, "\x1b") orelse data.len;
-                    try self.forwarder.writeAll(data[0..i]);
+                    try self.vt_stream.writeAll(data[0..i]);
                     data = data[i..];
                 }
             },
@@ -53,7 +53,7 @@ pub fn nextSlice(self: *Self, input: []const u8) !void {
                     self.state = .apc;
                     data = data[1..];
                 } else {
-                    try self.forwarder.writeByte('\x1b');
+                    try self.vt_stream.writeByte('\x1b');
                     self.state = .ground;
                 }
             },
@@ -68,7 +68,7 @@ pub fn nextSlice(self: *Self, input: []const u8) !void {
                         self.apc_content_len += i;
                         data = data[i..];
                     } else {
-                        try self.forwarder.writeAll(self.apc_content_buffer[0..self.apc_content_len]);
+                        try self.vt_stream.writeAll(self.apc_content_buffer[0..self.apc_content_len]);
                         self.apc_content_len = 0;
                         self.state = .ground;
                     }
@@ -87,7 +87,7 @@ pub fn nextSlice(self: *Self, input: []const u8) !void {
                         self.apc_content_len += 1;
                         self.state = .apc;
                     } else {
-                        try self.forwarder.writeAll(self.apc_content_buffer[0..self.apc_content_len]);
+                        try self.vt_stream.writeAll(self.apc_content_buffer[0..self.apc_content_len]);
                         self.apc_content_len = 0;
                         self.state = .ground;
                     }
@@ -98,21 +98,21 @@ pub fn nextSlice(self: *Self, input: []const u8) !void {
 }
 
 fn handleApc(self: *Self, content: []const u8) !void {
-    self.handleZmyApc(content) catch |err| {
-        std.log.warn("error handling ZMY apc sequence err={}", .{err});
-    };
-
-    try self.forwarder.writeAll("\x1b_");
-    try self.forwarder.writeAll(content);
-    try self.forwarder.writeAll("\x1b\\");
+    const zmy_prefix = "zmy;";
+    if (std.mem.startsWith(u8, content, zmy_prefix)) {
+        const payload = content[zmy_prefix.len..];
+        self.handleZmyApc(payload) catch |err| {
+            std.log.warn("error handling ZMY apc sequence err={}", .{err});
+        };
+    } else {
+        try self.vt_stream.writeAll("\x1b_");
+        try self.vt_stream.writeAll(content);
+        try self.vt_stream.writeAll("\x1b\\");
+    }
 }
 
-fn handleZmyApc(self: *Self, content: []const u8) !void {
-    const zmy_prefix = "zmy;";
-    if (!std.mem.startsWith(u8, content, zmy_prefix)) return;
-    const payload = content[zmy_prefix.len..];
-
-    const detach_prefix = "detach;client_id=";
+fn handleZmyApc(self: *Self, payload: []const u8) !void {
+    const detach_prefix = "detach;";
     if (std.mem.startsWith(u8, payload, detach_prefix)) {
         const encoded_client_id = payload[detach_prefix.len..];
 
@@ -122,13 +122,37 @@ fn handleZmyApc(self: *Self, content: []const u8) !void {
 
         if (std.mem.eql(u8, &client_id, &self.client_id)) {
             self.received_detach = true;
+        } else {
+            try self.vt_stream.writeAll("\x1b_zmy;detach;");
+            try self.vt_stream.writeAll(encoded_client_id);
+            try self.vt_stream.writeAll("\x1b\\");
         }
+
         return;
     }
 
-    const trace_prefix = "trace";
-    if (std.mem.eql(u8, payload, trace_prefix)) {
-        try self.forwarder.print("{s}: {x}\r\n", .{ self.session_name, self.client_id });
+    const trace_prefix = "trace;";
+    if (std.mem.startsWith(u8, payload, trace_prefix)) {
+        const data = payload[trace_prefix.len..];
+
+        const new_data = try std.fmt.bufPrint(
+            self.apc_content_buffer[self.apc_content_len..],
+            "{s}: {x}\n",
+            .{ self.session_name, self.client_id },
+        );
+
+        const i = self.apc_content_len - data.len;
+        const j = self.apc_content_len + new_data.len;
+        const all_data = self.apc_content_buffer[i..j];
+
+        try self.vt_stream.writeAll("\x1b]52;c;");
+        try std.base64.standard.Encoder.encodeWriter(self.vt_stream, all_data);
+        try self.vt_stream.writeAll("\x1b\\");
+
+        try self.vt_stream.writeAll("\x1b_zmy;trace;");
+        try self.vt_stream.writeAll(all_data);
+        try self.vt_stream.writeAll("\x1b\\");
+
         return;
     }
 

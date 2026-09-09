@@ -223,7 +223,7 @@ fn runDetach(
     const stdout_writer = &stdout_file_writer.interface;
 
     stdout_writer.print(
-        "\x1b_zmy;detach;client_id={s}\x1b\\",
+        "\x1b_zmy;detach;{s}\x1b\\",
         .{client_id},
     ) catch |err| switch (err) {
         error.WriteFailed => return stdout_file_writer.err.?,
@@ -240,7 +240,7 @@ fn runTrace(
     var stdout_file_writer = std.Io.File.stdout().writer(io, &buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    stdout_writer.writeAll("\x1b_zmy;trace\x1b\\") catch |err| switch (err) {
+    stdout_writer.writeAll("\x1b_zmy;trace;\x1b\\") catch |err| switch (err) {
         error.WriteFailed => return stdout_file_writer.err.?,
     };
     stdout_writer.flush() catch |err| switch (err) {
