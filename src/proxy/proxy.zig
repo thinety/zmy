@@ -61,13 +61,12 @@ fn handleConnection_(
         // not to read into the first messages and lose data
         var buffer: usize = undefined;
         var stream_reader = stream.reader(io, std.mem.asBytes(&buffer));
-        const reader = &stream_reader.interface;
 
-        break :len reader.takeInt(usize, .little) catch |err| switch (err) {
-            error.EndOfStream => return,
-            error.ReadFailed => return stream_reader.err.?,
-            else => |e| return e,
-        };
+        break :len stream_reader.interface.takeInt(usize, .little) catch |err|
+            switch (err) {
+                error.EndOfStream => return,
+                error.ReadFailed => return stream_reader.err.?,
+            };
     };
 
     const session_name = try gpa.alloc(u8, len + 1);
@@ -75,13 +74,13 @@ fn handleConnection_(
 
     {
         var stream_reader = stream.reader(io, &.{});
-        const reader = &stream_reader.interface;
 
-        reader.readSliceAll(session_name[0..len]) catch |err| switch (err) {
-            error.EndOfStream => return,
-            error.ReadFailed => return stream_reader.err.?,
-            else => |e| return e,
-        };
+        stream_reader.interface.readSliceAll(session_name[0..len]) catch |err|
+            switch (err) {
+                error.EndOfStream => return,
+                error.ReadFailed => return stream_reader.err.?,
+            };
+
         session_name[len] = 0;
     }
 
@@ -99,34 +98,30 @@ fn remoteToLocal(
     remote_stream: std.Io.net.Stream,
     local_stream: std.Io.net.Stream,
 ) !void {
-    var stream_reader = remote_stream.reader(io, &.{});
-    const reader = &stream_reader.interface;
-
+    var stream_reader_buffer: [4096]u8 = undefined;
+    var stream_reader = remote_stream.reader(io, &stream_reader_buffer);
     var stream_writer = local_stream.writer(io, &.{});
-    const writer = &stream_writer.interface;
 
     while (true) {
-        var buffer: [4096]u8 = undefined;
-        var n: usize = 0;
-        while (n == 0) {
-            var buffers = [_][]u8{&buffer};
-            n = reader.readVec(&buffers) catch |err| switch (err) {
+        stream_reader.interface.fillMore() catch |err|
+            switch (err) {
                 error.EndOfStream => return,
                 error.ReadFailed => return stream_reader.err.?,
-                else => |e| return e,
             };
-        }
 
-        const data = buffer[0..n];
+        const data = stream_reader.interface.buffered();
+        stream_reader.interface.tossBuffered();
+
         log.info("remote -> local: data.len={} data={b64}{s}", .{
             data.len,
             data[0..@min(data.len, 48)],
             if (data.len > 48) "..." else "",
         });
 
-        writer.writeAll(data) catch |err| switch (err) {
-            error.WriteFailed => return stream_writer.err.?,
-        };
+        stream_writer.interface.writeAll(data) catch |err|
+            switch (err) {
+                error.WriteFailed => return stream_writer.err.?,
+            };
     }
 }
 
@@ -135,33 +130,29 @@ fn localToRemote(
     remote_stream: std.Io.net.Stream,
     local_stream: std.Io.net.Stream,
 ) !void {
-    var stream_reader = local_stream.reader(io, &.{});
-    const reader = &stream_reader.interface;
-
+    var stream_reader_buffer: [4096]u8 = undefined;
+    var stream_reader = local_stream.reader(io, &stream_reader_buffer);
     var stream_writer = remote_stream.writer(io, &.{});
-    const writer = &stream_writer.interface;
 
     while (true) {
-        var buffer: [4096]u8 = undefined;
-        var n: usize = 0;
-        while (n == 0) {
-            var buffers = [_][]u8{&buffer};
-            n = reader.readVec(&buffers) catch |err| switch (err) {
+        stream_reader.interface.fillMore() catch |err|
+            switch (err) {
                 error.EndOfStream => return,
                 error.ReadFailed => return stream_reader.err.?,
-                else => |e| return e,
             };
-        }
 
-        const data = buffer[0..n];
+        const data = stream_reader.interface.buffered();
+        stream_reader.interface.tossBuffered();
+
         log.info("local -> remote: data.len={} data={b64}{s}", .{
             data.len,
             data[0..@min(data.len, 48)],
             if (data.len > 48) "..." else "",
         });
 
-        writer.writeAll(data) catch |err| switch (err) {
-            error.WriteFailed => return stream_writer.err.?,
-        };
+        stream_writer.interface.writeAll(data) catch |err|
+            switch (err) {
+                error.WriteFailed => return stream_writer.err.?,
+            };
     }
 }

@@ -60,29 +60,16 @@ fn readSocket(
     event_queue: *std.Io.Queue(daemon.Event),
     client: *anyopaque,
 ) !void {
-    var buffer: [4096]u8 = undefined;
-    var stream_reader = stream.reader(io, &buffer);
-    const reader = &stream_reader.interface;
-
-    {
-        const message = ipc.ClientInitialMessage.deserialize(reader) catch |err| switch (err) {
-            error.ReadFailed => return stream_reader.err.?,
-            else => |e| return e,
-        };
-
-        const event: daemon.Event = .{ .client_initial_message = .{
-            .client = client,
-            .message = message,
-        } };
-        try event_queue.putOne(io, event);
-    }
+    var stream_reader_buffer: [256]u8 = undefined;
+    var stream_reader = stream.reader(io, &stream_reader_buffer);
 
     while (true) {
-        var message = ipc.ClientMessage.deserialize(gpa, reader) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => return stream_reader.err.?,
-            else => |e| return e,
-        };
+        var message = ipc.ClientMessage.deserialize(gpa, &stream_reader.interface) catch |err|
+            switch (err) {
+                error.EndOfStream => return,
+                error.ReadFailed => return stream_reader.err.?,
+                else => |e| return e,
+            };
         errdefer message.deinit(gpa);
 
         const event: daemon.Event = .{ .client_message = .{
@@ -99,21 +86,18 @@ fn writeSocket(
     message_queue: *std.Io.Queue(ipc.DaemonMessage),
     stream: std.Io.net.Stream,
 ) !void {
-    var buffer: [8192]u8 = undefined;
-    var stream_writer = stream.writer(io, &buffer);
-    const writer = &stream_writer.interface;
+    var stream_writer_buffer: [4096]u8 = undefined;
+    var stream_writer = stream.writer(io, &stream_writer_buffer);
 
     while (true) {
         var message = try message_queue.getOne(io);
         defer message.deinit(gpa);
 
-        message.serialize(writer) catch |err| switch (err) {
+        message.serialize(&stream_writer.interface) catch |err| switch (err) {
             error.WriteFailed => return stream_writer.err.?,
-            else => |e| return e,
         };
-        writer.flush() catch |err| switch (err) {
+        stream_writer.interface.flush() catch |err| switch (err) {
             error.WriteFailed => return stream_writer.err.?,
-            else => |e| return e,
         };
     }
 }
