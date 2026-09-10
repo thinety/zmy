@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const ipc = @import("ipc.zig");
 const client = @import("client/client.zig");
 const daemon = @import("daemon/daemon.zig");
 const proxy = @import("proxy/proxy.zig");
@@ -41,37 +42,20 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, cmd, "daemon")) {
         const session_name = args.next() orelse return help(io);
 
-        return runDaemon(
-            gpa,
-            io,
-            rundir,
-            session_name,
-            shell,
-        );
+        return runDaemon(gpa, io, rundir, session_name, shell);
     }
 
     if (std.mem.eql(u8, cmd, "proxy")) {
         const address = args.next() orelse return help(io);
         const port = args.next() orelse return help(io);
 
-        return runProxy(
-            gpa,
-            io,
-            address,
-            port,
-            rundir,
-        );
+        return runProxy(gpa, io, address, port, rundir);
     }
 
     if (std.mem.eql(u8, cmd, "attach")) {
         const session_name = args.next() orelse return help(io);
 
-        return runAttach(
-            gpa,
-            io,
-            rundir,
-            session_name,
-        );
+        return runAttach(gpa, io, rundir, session_name);
     }
 
     if (std.mem.eql(u8, cmd, "connect")) {
@@ -79,13 +63,20 @@ pub fn main(init: std.process.Init) !void {
         const port = args.next() orelse return help(io);
         const session_name = args.next() orelse return help(io);
 
-        return runConnect(
-            gpa,
-            io,
-            destination,
-            port,
-            session_name,
-        );
+        return runConnect(gpa, io, destination, port, session_name);
+    }
+
+    if (std.mem.eql(u8, cmd, "send")) {
+        const session_name = args.next() orelse return help(io);
+
+        return runSend(gpa, io, rundir, session_name);
+    }
+
+    if (std.mem.eql(u8, cmd, "history")) {
+        const session_name = args.next() orelse return help(io);
+        const lines = args.next() orelse "0";
+
+        return runHistory(gpa, io, rundir, session_name, lines);
     }
 
     if (std.mem.eql(u8, cmd, "detach")) {
@@ -112,18 +103,19 @@ fn help(io: std.Io) !void {
         \\  connect <destination> <port> <session-name>     Attach to remote session
         \\  daemon <session-name>                           Runs the daemon process
         \\  detach <client-id>                              Detach the specified client
+        \\  history <session-name> [n]                      Print the last `n` lines of output
         \\  proxy <address> <port>                          Runs the proxy process
-        \\  trace                                           Print all client IDs
-        \\  help                                            Show this help
+        \\  send <session-name>                             Send stdin to session PTY
+        \\  trace                                           Copy all client IDs to clipboard
         \\
     ;
 
-    var stdout_file_writer = std.Io.File.stdout().writer(io, &.{});
-    const stdout_writer = &stdout_file_writer.interface;
+    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
 
-    stdout_writer.writeAll(help_text) catch |err| switch (err) {
-        error.WriteFailed => return stdout_file_writer.err.?,
-    };
+    stdout_writer.interface.writeAll(help_text) catch |err|
+        switch (err) {
+            error.WriteFailed => return stdout_writer.err.?,
+        };
 }
 
 fn runDaemon(
@@ -197,55 +189,117 @@ fn runConnect(
     // for now we do the most basic session negotiation possible:
     // we say which session we want and hope for the best
     {
-        var buffer: [256]u8 = undefined;
-        var stream_writer = stream.writer(io, &buffer);
-        const writer = &stream_writer.interface;
+        var stream_writer = stream.writer(io, &.{});
 
-        writer.writeInt(usize, session_name.len, .little) catch |err| switch (err) {
-            error.WriteFailed => return stream_writer.err.?,
-        };
-        writer.writeAll(session_name) catch |err| switch (err) {
-            error.WriteFailed => return stream_writer.err.?,
-        };
-
-        try writer.flush();
+        stream_writer.interface.writeInt(usize, session_name.len, .little) catch |err|
+            switch (err) {
+                error.WriteFailed => return stream_writer.err.?,
+            };
+        stream_writer.interface.writeAll(session_name) catch |err|
+            switch (err) {
+                error.WriteFailed => return stream_writer.err.?,
+            };
     }
 
     try client.run(gpa, io, stream, session_name);
+}
+
+fn runSend(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    rundir: []const u8,
+    session_name: [:0]const u8,
+) !void {
+    const stream = try connectToSocket(gpa, io, rundir, session_name);
+    defer stream.close(io);
+
+    var stdin_reader = std.Io.File.stdin().reader(io, &.{});
+    var stdin_buffer: std.Io.Writer.Allocating = .init(gpa);
+    defer stdin_buffer.deinit();
+
+    _ = stdin_reader.interface.streamRemaining(&stdin_buffer.writer) catch |err|
+        switch (err) {
+            error.ReadFailed => return stdin_reader.err.?,
+            error.WriteFailed => return error.OutOfMemory,
+        };
+
+    const message: ipc.ClientMessage = .{ .data = stdin_buffer.written() };
+    var stream_writer = stream.writer(io, &.{});
+
+    message.serialize(&stream_writer.interface) catch |err|
+        switch (err) {
+            error.WriteFailed => return stream_writer.err.?,
+        };
+}
+
+fn runHistory(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    rundir: []const u8,
+    session_name: [:0]const u8,
+    lines: []const u8,
+) !void {
+    const lines_ = try std.fmt.parseInt(usize, lines, 10);
+
+    const stream = try connectToSocket(gpa, io, rundir, session_name);
+    defer stream.close(io);
+
+    const client_message: ipc.ClientMessage = .{ .history = lines_ };
+    var stream_writer = stream.writer(io, &.{});
+
+    client_message.serialize(&stream_writer.interface) catch |err|
+        switch (err) {
+            error.WriteFailed => return stream_writer.err.?,
+        };
+
+    var stream_reader_buffer: [256]u8 = undefined;
+    var stream_reader = stream.reader(io, &stream_reader_buffer);
+
+    var daemon_message = ipc.DaemonMessage.deserialize(gpa, &stream_reader.interface) catch |err|
+        switch (err) {
+            error.ReadFailed => return stream_reader.err.?,
+            else => |e| return e,
+        };
+    defer daemon_message.deinit(gpa);
+
+    switch (daemon_message) {
+        .data => |data| {
+            var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+
+            stdout_writer.interface.writeAll(data) catch |err|
+                switch (err) {
+                    error.WriteFailed => return stdout_writer.err.?,
+                };
+        },
+    }
 }
 
 fn runDetach(
     io: std.Io,
     client_id: []const u8,
 ) !void {
-    var buffer: [256]u8 = undefined;
-    var stdout_file_writer = std.Io.File.stdout().writer(io, &buffer);
-    const stdout_writer = &stdout_file_writer.interface;
+    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
 
-    stdout_writer.print(
+    stdout_writer.interface.print(
         "\x1b_zmy;detach;{s}\x1b\\",
         .{client_id},
-    ) catch |err| switch (err) {
-        error.WriteFailed => return stdout_file_writer.err.?,
-    };
-    stdout_writer.flush() catch |err| switch (err) {
-        error.WriteFailed => return stdout_file_writer.err.?,
-    };
+    ) catch |err|
+        switch (err) {
+            error.WriteFailed => return stdout_writer.err.?,
+        };
 }
 
 fn runTrace(
     io: std.Io,
 ) !void {
-    var buffer: [256]u8 = undefined;
-    var stdout_file_writer = std.Io.File.stdout().writer(io, &buffer);
-    const stdout_writer = &stdout_file_writer.interface;
+    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
 
-    stdout_writer.writeAll("\x1b_zmy;trace;\x1b\\") catch |err| switch (err) {
-        error.WriteFailed => return stdout_file_writer.err.?,
-    };
-    stdout_writer.flush() catch |err| switch (err) {
-        error.WriteFailed => return stdout_file_writer.err.?,
-    };
+    stdout_writer.interface.writeAll(
+        "\x1b_zmy;trace;\x1b\\",
+    ) catch |err|
+        switch (err) {
+            error.WriteFailed => return stdout_writer.err.?,
+        };
 }
 
 pub fn connectToSocket(

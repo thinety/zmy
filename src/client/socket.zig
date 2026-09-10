@@ -8,16 +8,16 @@ pub fn readSocket(
     stream: std.Io.net.Stream,
     event_queue: *std.Io.Queue(client.Event),
 ) !void {
-    var buffer: [4096]u8 = undefined;
-    var stream_reader = stream.reader(io, &buffer);
-    const reader = &stream_reader.interface;
+    var stream_reader_buffer: [256]u8 = undefined;
+    var stream_reader = stream.reader(io, &stream_reader_buffer);
 
     while (true) {
-        var message = ipc.DaemonMessage.deserialize(gpa, reader) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => return stream_reader.err.?,
-            else => |e| return e,
-        };
+        var message = ipc.DaemonMessage.deserialize(gpa, &stream_reader.interface) catch |err|
+            switch (err) {
+                error.EndOfStream => return,
+                error.ReadFailed => return stream_reader.err.?,
+                else => |e| return e,
+            };
         errdefer message.deinit(gpa);
 
         const event: client.Event = .{ .daemon_message = message };
@@ -30,32 +30,21 @@ pub fn writeSocket(
     io: std.Io,
     message_queue: *std.Io.Queue(ipc.ClientMessage),
     stream: std.Io.net.Stream,
-    initial_message: ipc.ClientInitialMessage,
 ) !void {
-    var buffer: [8192]u8 = undefined;
-    var stream_writer = stream.writer(io, &buffer);
-    const writer = &stream_writer.interface;
-
-    initial_message.serialize(writer) catch |err| switch (err) {
-        error.WriteFailed => return stream_writer.err.?,
-        else => |e| return e,
-    };
-    writer.flush() catch |err| switch (err) {
-        error.WriteFailed => return stream_writer.err.?,
-        else => |e| return e,
-    };
+    var stream_writer_buffer: [4096]u8 = undefined;
+    var stream_writer = stream.writer(io, &stream_writer_buffer);
 
     while (true) {
         var message = try message_queue.getOne(io);
         defer message.deinit(gpa);
 
-        message.serialize(writer) catch |err| switch (err) {
-            error.WriteFailed => return stream_writer.err.?,
-            else => |e| return e,
-        };
-        writer.flush() catch |err| switch (err) {
-            error.WriteFailed => return stream_writer.err.?,
-            else => |e| return e,
-        };
+        message.serialize(&stream_writer.interface) catch |err|
+            switch (err) {
+                error.WriteFailed => return stream_writer.err.?,
+            };
+        stream_writer.interface.flush() catch |err|
+            switch (err) {
+                error.WriteFailed => return stream_writer.err.?,
+            };
     }
 }

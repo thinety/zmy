@@ -7,16 +7,12 @@ const ipc = @import("../ipc.zig");
 const socket_mod = @import("socket.zig");
 const pty_mod = @import("pty.zig");
 const stream_mod = @import("ghostty/stream.zig");
-const formatter_mod = @import("ghostty/formatter.zig");
+const TerminalFormatter = @import("ghostty/TerminalFormatter.zig");
 
 const log = std.log.scoped(.zmy_daemon);
 
 pub const Event = union(enum) {
     client_connected: std.Io.net.Stream,
-    client_initial_message: struct {
-        client: *anyopaque,
-        message: ipc.ClientInitialMessage,
-    },
     client_message: struct {
         client: *anyopaque,
         message: ipc.ClientMessage,
@@ -30,9 +26,6 @@ pub const Event = union(enum) {
         switch (self.*) {
             .client_connected => |stream| {
                 stream.close(io);
-            },
-            .client_initial_message => |*payload| {
-                _ = payload;
             },
             .client_message => |*payload| {
                 payload.message.deinit(gpa);
@@ -207,43 +200,47 @@ fn mainLoop(
 
                 clients.append(&client.node);
             },
-            .client_initial_message => |payload| {
-                const client: *Client = @ptrCast(@alignCast(payload.client));
-                log.info("Event.client_initial_message: stream={}", .{client.stream.socket.handle});
-
-                std.debug.assert(client.winsize == null);
-                client.winsize = payload.message.winsize;
-
-                try doResize(
-                    gpa,
-                    io,
-                    clients,
-                    &vt_stream_handler,
-                    pty,
-                    last_winsize,
-                    &pty_buffer,
-                    ptyin_queue,
-                );
-
-                var allocating: std.Io.Writer.Allocating = .init(gpa);
-                defer allocating.deinit();
-
-                try formatter_mod.formatTerminal(&term, &allocating.writer);
-
-                if (allocating.writer.buffered().len > 0) {
-                    const data = try allocating.toOwnedSlice();
-                    const message: ipc.DaemonMessage = .{ .data = data };
-                    client.message_queue.putOne(io, message) catch |err| {
-                        gpa.free(data);
-                        switch (err) {
-                            error.Closed => {},
-                            else => |e| return e,
-                        }
-                    };
-                }
-            },
             .client_message => |payload| {
                 switch (payload.message) {
+                    .data => |data| {
+                        errdefer gpa.free(data);
+                        log.info("ClientMessage.data: data.len={} data={b64}{s}", .{
+                            data.len,
+                            data[0..@min(data.len, 48)],
+                            if (data.len > 48) "..." else "",
+                        });
+
+                        try ptyin_queue.putOne(io, data);
+                    },
+                    .history => |lines| {
+                        log.info(
+                            "ClientMessage.history: lines={}",
+                            .{lines},
+                        );
+
+                        const client: *Client = @ptrCast(@alignCast(payload.client));
+
+                        var allocating: std.Io.Writer.Allocating = .init(gpa);
+                        defer allocating.deinit();
+
+                        const terminal_formatter: TerminalFormatter = .init(
+                            &term,
+                            .{ .plain = lines },
+                        );
+                        try terminal_formatter.format(&allocating.writer);
+
+                        if (allocating.writer.buffered().len > 0) {
+                            const data = try allocating.toOwnedSlice();
+                            const message: ipc.DaemonMessage = .{ .data = data };
+                            client.message_queue.putOne(io, message) catch |err| {
+                                gpa.free(data);
+                                switch (err) {
+                                    error.Closed => {},
+                                    else => |e| return e,
+                                }
+                            };
+                        }
+                    },
                     .resize => |winsize| {
                         log.info(
                             "ClientMessage.resize: col={} row={} xpixel={} ypixel={}",
@@ -251,6 +248,8 @@ fn mainLoop(
                         );
 
                         const client: *Client = @ptrCast(@alignCast(payload.client));
+
+                        const first_resize = client.winsize == null;
                         client.winsize = winsize;
 
                         try doResize(
@@ -263,16 +262,29 @@ fn mainLoop(
                             &pty_buffer,
                             ptyin_queue,
                         );
-                    },
-                    .data => |data| {
-                        errdefer gpa.free(data);
-                        log.info("ClientMessage.data: data.len={} data={b64}{s}", .{
-                            data.len,
-                            data[0..@min(data.len, 48)],
-                            if (data.len > 48) "..." else "",
-                        });
 
-                        try ptyin_queue.putOne(io, data);
+                        if (first_resize) {
+                            var allocating: std.Io.Writer.Allocating = .init(gpa);
+                            defer allocating.deinit();
+
+                            const terminal_formatter: TerminalFormatter = .init(
+                                &term,
+                                .vt,
+                            );
+                            try terminal_formatter.format(&allocating.writer);
+
+                            if (allocating.writer.buffered().len > 0) {
+                                const data = try allocating.toOwnedSlice();
+                                const message: ipc.DaemonMessage = .{ .data = data };
+                                client.message_queue.putOne(io, message) catch |err| {
+                                    gpa.free(data);
+                                    switch (err) {
+                                        error.Closed => {},
+                                        else => |e| return e,
+                                    }
+                                };
+                            }
+                        }
                     },
                 }
             },

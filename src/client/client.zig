@@ -39,8 +39,8 @@ pub fn run(
 ) !void {
     try closeStderrIfTty();
     defer {
-        const stdout = std.Io.File.stdout();
-        var stdout_writer = stdout.writer(io, &.{});
+        var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+
         stdout_writer.interface.writeAll("\x1bc") catch |err| switch (err) {
             error.WriteFailed => {
                 log.err("failed to reset terminal on shutdown: {t}", .{stdout_writer.err.?});
@@ -116,12 +116,15 @@ pub fn run(
         }
     }
 
+    {
+        const initial_message: ipc.ClientMessage = .{
+            .resize = try getWinsize(),
+        };
+        try message_queue.putOne(io, initial_message);
+    }
+
     var client_id: ClientId = undefined;
     io.random(&client_id);
-
-    const initial_message: ipc.ClientInitialMessage = .{
-        .winsize = try getWinsize(),
-    };
 
     const signals: std.Io.File = signals: {
         var sigset = std.os.linux.sigemptyset();
@@ -155,7 +158,7 @@ pub fn run(
         .{ stdio_mod.readStdin, .{ gpa, io, &event_queue } },
         .{ stdio_mod.writeStdout, .{ gpa, io, &stdout_queue } },
         .{ socket_mod.readSocket, .{ gpa, io, stream, &event_queue } },
-        .{ socket_mod.writeSocket, .{ gpa, io, &message_queue, stream, initial_message } },
+        .{ socket_mod.writeSocket, .{ gpa, io, &message_queue, stream } },
         .{ readSignals, .{ io, signals, &event_queue } },
         .{ mainLoop, .{ gpa, io, &event_queue, &stdout_queue, &message_queue, session_name, client_id } },
     });
@@ -167,14 +170,14 @@ fn readSignals(
     event_queue: *std.Io.Queue(Event),
 ) !void {
     var file_reader = signals.reader(io, &.{});
-    const reader = &file_reader.interface;
 
     while (true) {
         var siginfo: std.os.linux.signalfd_siginfo = undefined;
-        reader.readSliceAll(std.mem.asBytes(&siginfo)) catch |err| switch (err) {
-            error.ReadFailed => return file_reader.err.?,
-            else => |e| return e,
-        };
+        file_reader.interface.readSliceAll(std.mem.asBytes(&siginfo)) catch |err|
+            switch (err) {
+                error.EndOfStream => return error.EndOfStream,
+                error.ReadFailed => return file_reader.err.?,
+            };
 
         switch (@as(std.os.linux.SIG, @enumFromInt(siginfo.signo))) {
             std.os.linux.SIG.WINCH => {
