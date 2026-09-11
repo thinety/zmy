@@ -29,6 +29,8 @@ pub fn main(init: std.process.Init) !void {
         else => |e| return e,
     };
 
+    const current_session_name = environ_map.get("ZMY_SESSION");
+
     const shell =
         if (environ_map.get("SHELL")) |s|
             try arena.dupeZ(u8, s)
@@ -79,6 +81,10 @@ pub fn main(init: std.process.Init) !void {
         return runHistory(gpa, io, rundir, session_name, lines);
     }
 
+    if (std.mem.eql(u8, cmd, "list")) {
+        return runList(gpa, io, rundir, current_session_name);
+    }
+
     if (std.mem.eql(u8, cmd, "detach")) {
         const client_id = args.next() orelse return help(io);
 
@@ -104,6 +110,7 @@ fn help(io: std.Io) !void {
         \\  daemon <session-name>                           Runs the daemon process
         \\  detach <client-id>                              Detach the specified client
         \\  history <session-name> [n]                      Print the last `n` lines of output
+        \\  list                                            List active sessions
         \\  proxy <address> <port>                          Runs the proxy process
         \\  send <session-name>                             Send stdin to session PTY
         \\  trace                                           Copy all client IDs to clipboard
@@ -271,6 +278,66 @@ fn runHistory(
                     error.WriteFailed => return stdout_writer.err.?,
                 };
         },
+    }
+}
+
+fn runList(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    rundir: []const u8,
+    current_session_name: ?[]const u8,
+) !void {
+    var session_names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (session_names.items) |session_name| {
+            gpa.free(session_name);
+        }
+        session_names.deinit(gpa);
+    }
+
+    const dir = try std.Io.Dir.cwd().openDir(io, rundir, .{ .iterate = true });
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        const stat = try dir.statFile(io, entry.name, .{});
+        if (stat.kind != .unix_domain_socket) continue;
+
+        const session_name = try gpa.dupe(u8, entry.name);
+        errdefer gpa.free(session_name);
+
+        try session_names.append(gpa, session_name);
+    }
+
+    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+
+    if (session_names.items.len == 0) {
+        stdout_writer.interface.print(
+            "no sessions found in {s}\n",
+            .{rundir},
+        ) catch |err|
+            switch (err) {
+                error.WriteFailed => return stdout_writer.err.?,
+            };
+        return;
+    }
+    for (session_names.items) |session_name| {
+        const prefix =
+            if (current_session_name) |current|
+                if (std.mem.eql(u8, session_name, current))
+                    "→ "
+                else
+                    "  "
+            else
+                "";
+
+        stdout_writer.interface.print(
+            "{s}{s}\n",
+            .{ prefix, session_name },
+        ) catch |err|
+            switch (err) {
+                error.WriteFailed => return stdout_writer.err.?,
+            };
     }
 }
 
