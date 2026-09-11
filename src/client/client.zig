@@ -242,8 +242,8 @@ fn mainLoop(
                         defer gpa.free(data);
                         log.info("DaemonMessage.data: data.len={} data={b64}{s}", .{
                             data.len,
-                            data[0..@min(data.len, 48)],
-                            if (data.len > 48) "..." else "",
+                            data[0..@min(data.len, 24)],
+                            if (data.len > 24) "..." else "",
                         });
 
                         try apc_parser.nextSlice(data);
@@ -264,8 +264,8 @@ fn mainLoop(
                 errdefer gpa.free(data);
                 log.info("Event.stdin: data.len={} data={b64}{s}", .{
                     data.len,
-                    data[0..@min(data.len, 48)],
-                    if (data.len > 48) "..." else "",
+                    data[0..@min(data.len, 24)],
+                    if (data.len > 24) "..." else "",
                 });
 
                 const message: ipc.ClientMessage = .{ .data = data };

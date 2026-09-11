@@ -98,7 +98,9 @@ fn remoteToLocal(
     remote_stream: std.Io.net.Stream,
     local_stream: std.Io.net.Stream,
 ) !void {
-    var stream_reader_buffer: [4096]u8 = undefined;
+    // an ipc.ClientMessage.data has at most 4096 bytes (see `client/stdio.zig`).
+    // we double that so that all messages are transmitted at once
+    var stream_reader_buffer: [2*4096]u8 = undefined;
     var stream_reader = remote_stream.reader(io, &stream_reader_buffer);
     var stream_writer = local_stream.writer(io, &.{});
 
@@ -114,8 +116,8 @@ fn remoteToLocal(
 
         log.info("remote -> local: data.len={} data={b64}{s}", .{
             data.len,
-            data[0..@min(data.len, 48)],
-            if (data.len > 48) "..." else "",
+            data[0..@min(data.len, 24)],
+            if (data.len > 24) "..." else "",
         });
 
         stream_writer.interface.writeAll(data) catch |err|
@@ -130,7 +132,11 @@ fn localToRemote(
     remote_stream: std.Io.net.Stream,
     local_stream: std.Io.net.Stream,
 ) !void {
-    var stream_reader_buffer: [4096]u8 = undefined;
+    // an ipc.DaemonMessage.data has around 64*1024 bytes (see `daemon/pty.zig`,
+    // it's around the same size after going through the VT stream parser, and
+    // not accounting for initial hydration or history messages which are a lot
+    // less common). we double that so that all messages are transmitted at once.
+    var stream_reader_buffer: [2*64*1024]u8 = undefined;
     var stream_reader = local_stream.reader(io, &stream_reader_buffer);
     var stream_writer = remote_stream.writer(io, &.{});
 
@@ -146,8 +152,8 @@ fn localToRemote(
 
         log.info("local -> remote: data.len={} data={b64}{s}", .{
             data.len,
-            data[0..@min(data.len, 48)],
-            if (data.len > 48) "..." else "",
+            data[0..@min(data.len, 24)],
+            if (data.len > 24) "..." else "",
         });
 
         stream_writer.interface.writeAll(data) catch |err|
