@@ -206,8 +206,8 @@ fn mainLoop(
                         errdefer gpa.free(data);
                         log.info("ClientMessage.data: data.len={} data={b64}{s}", .{
                             data.len,
-                            data[0..@min(data.len, 48)],
-                            if (data.len > 48) "..." else "",
+                            data[0..@min(data.len, 24)],
+                            if (data.len > 24) "..." else "",
                         });
 
                         try ptyin_queue.putOne(io, data);
@@ -328,8 +328,8 @@ fn mainLoop(
                 defer gpa.free(data);
                 log.info("Event.ptyout: data.len={} data={b64}{s}", .{
                     data.len,
-                    data[0..@min(data.len, 48)],
-                    if (data.len > 48) "..." else "",
+                    data[0..@min(data.len, 24)],
+                    if (data.len > 24) "..." else "",
                 });
 
                 vt_stream.nextSlice(data);
@@ -355,7 +355,7 @@ fn mainLoop(
                         // instead of copying the same data to every client
                         const client_data = try gpa.dupe(u8, vt_stream_buffer.written());
                         const message: ipc.DaemonMessage = .{ .data = client_data };
-                        async.timeout(io, .fromMilliseconds(200), .real, .{
+                        async.timeout(io, .fromMilliseconds(500), .real, .{
                             @TypeOf(client.message_queue).putOne,
                             .{ &client.message_queue, io, message },
                         }) catch |err| {

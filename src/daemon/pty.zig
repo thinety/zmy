@@ -7,7 +7,7 @@ pub fn readPty(
     pty: std.Io.File,
     event_queue: *std.Io.Queue(daemon.Event),
 ) !void {
-    var file_reader_buffer: [4096]u8 = undefined;
+    var file_reader_buffer: [64*1024]u8 = undefined;
     var file_reader = pty.reader(io, &file_reader_buffer);
 
     while (true) {

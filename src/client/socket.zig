@@ -31,7 +31,7 @@ pub fn writeSocket(
     message_queue: *std.Io.Queue(ipc.ClientMessage),
     stream: std.Io.net.Stream,
 ) !void {
-    var stream_writer_buffer: [4096]u8 = undefined;
+    var stream_writer_buffer: [256]u8 = undefined;
     var stream_writer = stream.writer(io, &stream_writer_buffer);
 
     while (true) {
