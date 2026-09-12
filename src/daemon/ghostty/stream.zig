@@ -582,11 +582,11 @@ pub const Handler = struct {
             .start_hyperlink => {
                 try self.terminal.screens.active.startHyperlink(value.uri, value.id);
 
+                try self.vt_stream.writeAll("\x1b]8;");
                 if (value.id) |id| {
-                    try self.vt_stream.print("\x1b]8;;{s}\x1b\\{s}\x1b]8;;\x1b\\", .{ value.uri, id });
-                } else {
-                    try self.vt_stream.print("\x1b]8;;{s}\x1b\\", .{value.uri});
+                    try self.vt_stream.print("id={s}", .{id});
                 }
+                try self.vt_stream.print(";{s}\x1b\\", .{value.uri});
             },
             .end_hyperlink => {
                 self.terminal.screens.active.endHyperlink();
