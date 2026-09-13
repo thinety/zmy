@@ -5,6 +5,7 @@ const ipc = @import("../ipc.zig");
 const socket_mod = @import("socket.zig");
 const stdio_mod = @import("stdio.zig");
 const ApcParser = @import("ApcParser.zig");
+const InputParser = @import("InputParser.zig");
 
 const log = std.log.scoped(.zmy_client);
 
@@ -224,6 +225,11 @@ fn mainLoop(
         client_id,
     );
 
+    var stdin_buffer: std.Io.Writer.Allocating = .init(gpa);
+    defer stdin_buffer.deinit();
+
+    var input_parser: InputParser = .init(&stdin_buffer.writer);
+
     while (true) {
         const event = try event_queue.getOne(io);
         switch (event) {
@@ -261,15 +267,25 @@ fn mainLoop(
                 }
             },
             .stdin => |data| {
-                errdefer gpa.free(data);
+                defer gpa.free(data);
                 log.info("Event.stdin: data.len={} data={b64}{s}", .{
                     data.len,
                     data[0..@min(data.len, 24)],
                     if (data.len > 24) "..." else "",
                 });
 
-                const message: ipc.ClientMessage = .{ .data = data };
-                try message_queue.putOne(io, message);
+                try input_parser.nextSlice(data);
+                if (input_parser.received_ctrl_backslash) {
+                    break;
+                }
+
+                if (stdin_buffer.written().len > 0) {
+                    const stdin_data = try stdin_buffer.toOwnedSlice();
+                    errdefer gpa.free(stdin_data);
+
+                    const message: ipc.ClientMessage = .{ .data = stdin_data };
+                    try message_queue.putOne(io, message);
+                }
             },
         }
     }
