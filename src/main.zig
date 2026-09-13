@@ -362,7 +362,7 @@ fn runTrace(
     var stdout_writer = std.Io.File.stdout().writer(io, &.{});
 
     stdout_writer.interface.writeAll(
-        "\x1b_zmy;trace;\x1b\\",
+        "\x1b_zmy;trace\x1b\\\x1b]52;c;\x1b\\",
     ) catch |err|
         switch (err) {
             error.WriteFailed => return stdout_writer.err.?,

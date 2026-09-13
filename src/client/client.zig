@@ -247,7 +247,7 @@ fn mainLoop(
                         });
 
                         try apc_parser.nextSlice(data);
-                        if (apc_parser.received_detach) {
+                        if (apc_parser.seen_detach) {
                             break;
                         }
 
