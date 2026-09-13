@@ -476,6 +476,63 @@ fn spawnDaemon(rundir: []const u8, session_name: [:0]const u8) !void {
             },
         };
 
+        // rotate any existing log file out of the way so we start fresh
+        switch (std.c.errno(std.c.access(path, std.c.F_OK))) {
+            .SUCCESS => {
+                var n: usize = 1;
+                while (true) {
+                    const rotated_name = std.fmt.allocPrint(
+                        std.heap.page_allocator,
+                        "{s}.log.{d}",
+                        .{ session_name, n },
+                    ) catch |err| switch (err) {
+                        error.OutOfMemory => {
+                            log.err("out of memory", .{});
+                            std.process.exit(1);
+                        },
+                    };
+                    defer std.heap.page_allocator.free(rotated_name);
+
+                    const rotated_path = std.fs.path.joinZ(
+                        std.heap.page_allocator,
+                        &.{ rundir, rotated_name },
+                    ) catch |err| switch (err) {
+                        error.OutOfMemory => {
+                            log.err("out of memory", .{});
+                            std.process.exit(1);
+                        },
+                    };
+                    defer std.heap.page_allocator.free(rotated_path);
+
+                    // skip integers that are already in use
+                    switch (std.c.errno(std.c.access(rotated_path, std.c.F_OK))) {
+                        .SUCCESS => {
+                            n += 1;
+                            continue;
+                        },
+                        .NOENT => {},
+                        else => |err| {
+                            log.err("access({s}, F_OK) failed: {t}", .{ rotated_path, err });
+                            std.process.exit(1);
+                        },
+                    }
+
+                    switch (std.c.errno(std.c.rename(path, rotated_path))) {
+                        .SUCCESS => break,
+                        else => |err| {
+                            log.err("rename({s}, {s}) failed: {t}", .{ path, rotated_path, err });
+                            std.process.exit(1);
+                        },
+                    }
+                }
+            },
+            .NOENT => {},
+            else => |err| {
+                log.err("access({s}, F_OK) failed: {t}", .{ path, err });
+                std.process.exit(1);
+            },
+        }
+
         const log_file = std.c.open(
             path,
             .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
