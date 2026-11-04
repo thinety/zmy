@@ -223,7 +223,7 @@ pub const Handler = struct {
             .cursor_style => {
                 self.terminal.setCursorStyle(value);
 
-                try self.vt_stream.print("\x1b[{d} q", .{@intFromEnum(value)});
+                try self.vt_stream.print("\x1b[{d} q", .{@backingInt(value)});
             },
             .erase_display_below => {
                 self.terminal.eraseDisplay(.below, value);
@@ -464,11 +464,11 @@ pub const Handler = struct {
                     .reset_inverse => try self.vt_stream.writeAll("27"),
                     .reset_invisible => try self.vt_stream.writeAll("28"),
                     .reset_strikethrough => try self.vt_stream.writeAll("29"),
-                    .@"8_fg" => |c| try self.vt_stream.print("{d}", .{@intFromEnum(c) + 30}),
+                    .@"8_fg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 30}),
                     .direct_color_fg => |c| try self.vt_stream.print("38;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
                     .@"256_fg" => |idx| try self.vt_stream.print("38;5;{d}", .{idx}),
                     .reset_fg => try self.vt_stream.writeAll("39"),
-                    .@"8_bg" => |c| try self.vt_stream.print("{d}", .{@intFromEnum(c) + 40}),
+                    .@"8_bg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 40}),
                     .direct_color_bg => |c| try self.vt_stream.print("48;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
                     .@"256_bg" => |idx| try self.vt_stream.print("48;5;{d}", .{idx}),
                     .reset_bg => try self.vt_stream.writeAll("49"),
@@ -477,8 +477,8 @@ pub const Handler = struct {
                     .underline_color => |c| try self.vt_stream.print("58;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
                     .@"256_underline_color" => |idx| try self.vt_stream.print("58;5;{d}", .{idx}),
                     .reset_underline_color => try self.vt_stream.writeAll("59"),
-                    .@"8_bright_fg" => |c| try self.vt_stream.print("{d}", .{@intFromEnum(c) + 82}),
-                    .@"8_bright_bg" => |c| try self.vt_stream.print("{d}", .{@intFromEnum(c) + 92}),
+                    .@"8_bright_fg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 82}),
+                    .@"8_bright_bg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 92}),
                     // The "unknown" variant re-emits the raw parameters verbatim since
                     // we can't map it to a known SGR code.
                     .unknown => {
@@ -751,7 +751,7 @@ pub const Handler = struct {
                                 self.terminal.flags.dirty.palette = true;
                                 self.terminal.colors.palette.reset(@intCast(i));
                             }
-                            mask.* = .initEmpty();
+                            mask.* = .empty;
                         },
 
                         .reset_special => {},
@@ -863,6 +863,8 @@ pub const Handler = struct {
                             pos.x + 1,
                         });
                     },
+                    // TODO(thiago): ghostty 1.4.0
+                    .cursor_position_extended => {},
 
                     .color_scheme => {},
 
@@ -911,6 +913,8 @@ pub const Handler = struct {
                             .csi_16_t => .csi_16_t,
                             .csi_18_t => .csi_18_t,
                             .csi_21_t => unreachable,
+                            // TODO(thiago): ghostty 1.4.0
+                            .csi_19_t => unreachable,
                         };
                         try ghostty.size_report.encode(self.pty, report_style, .{
                             .rows = self.terminal.rows,
@@ -919,6 +923,9 @@ pub const Handler = struct {
                             .cell_height = self.terminal.height_px / self.terminal.rows,
                         });
                     },
+
+                    // TODO(thiago): ghostty 1.4.0
+                    .csi_19_t => {},
                 }
             },
             .window_title => {
@@ -958,7 +965,7 @@ pub const Handler = struct {
                 // Re-emit the ConEmu OSC 9;4 progress report. The state is
                 // encoded as its integer value and the optional progress
                 // percentage is appended when present.
-                try self.vt_stream.print("\x1b]9;4;{d}", .{@intFromEnum(value.state)});
+                try self.vt_stream.print("\x1b]9;4;{d}", .{@backingInt(value.state)});
                 if (value.progress) |p| {
                     try self.vt_stream.print(";{d}", .{p});
                 }
@@ -1060,6 +1067,18 @@ pub const Handler = struct {
             .title_pop => {
                 try self.vt_stream.print("\x1b[23;0;{d}t", .{value});
             },
+
+            // TODO(thiago): ghostty 1.4.0
+            .kitty_clipboard,
+            .kitty_dnd,
+            .resize_window,
+            .osc_unknown,
+            .mouse_shape_reset,
+            .request_xt_checksum,
+            .xt_checksum_extension,
+            .program_status,
+            .soft_reset,
+            => {},
         }
     }
 
@@ -1212,6 +1231,9 @@ pub const Handler = struct {
             => |m| {
                 try self.forwardMode(m, enabled);
             },
+
+            // TODO(thiago): ghostty 1.4.0
+            .kitty_paste_events => {},
         }
     }
 
@@ -1269,7 +1291,7 @@ pub const Handler = struct {
             .delete => |delete| {
                 try self.vt_stream.print("a={c}", .{'d'});
 
-                switch (delete) {
+                switch (delete.action) {
                     .all => |del| {
                         try kv.chr(self.vt_stream, 'd', if (del) 'A' else 'a');
                     },
@@ -1290,8 +1312,8 @@ pub const Handler = struct {
                     .intersect_cursor => |del| {
                         try kv.chr(self.vt_stream, 'd', if (del) 'C' else 'c');
                     },
-                    .animation_frames => |del| {
-                        try kv.chr(self.vt_stream, 'd', if (del) 'F' else 'f');
+                    .animation_frames => |v| {
+                        try kv.chr(self.vt_stream, 'd', if (v.delete) 'F' else 'f');
                     },
                     .intersect_cell => |v| {
                         try kv.chr(self.vt_stream, 'd', if (v.delete) 'P' else 'p');
@@ -1339,7 +1361,7 @@ pub const Handler = struct {
                     try kv.uint(self.vt_stream, 'r', animation_frame_loading.edit_frame);
                 }
                 if (animation_frame_loading.gap_ms != 0) {
-                    try kv.uint(self.vt_stream, 'z', animation_frame_loading.gap_ms);
+                    try kv.iint(self.vt_stream, 'z', animation_frame_loading.gap_ms);
                 }
                 switch (animation_frame_loading.composition_mode) {
                     .alpha_blend => {},
@@ -1372,7 +1394,7 @@ pub const Handler = struct {
                     try kv.uint(self.vt_stream, 'r', animation_control.frame);
                 }
                 if (animation_control.gap_ms != 0) {
-                    try kv.uint(self.vt_stream, 'z', animation_control.gap_ms);
+                    try kv.iint(self.vt_stream, 'z', animation_control.gap_ms);
                 }
                 if (animation_control.current_frame != 0) {
                     try kv.uint(self.vt_stream, 'c', animation_control.current_frame);
@@ -1384,11 +1406,11 @@ pub const Handler = struct {
             .compose_animation => |animation_frame_composition| {
                 try self.vt_stream.print("a={c}", .{'c'});
 
-                if (animation_frame_composition.frame != 0) {
-                    try kv.uint(self.vt_stream, 'c', animation_frame_composition.frame);
+                if (animation_frame_composition.dest_frame != 0) {
+                    try kv.uint(self.vt_stream, 'c', animation_frame_composition.dest_frame);
                 }
-                if (animation_frame_composition.edit_frame != 0) {
-                    try kv.uint(self.vt_stream, 'r', animation_frame_composition.edit_frame);
+                if (animation_frame_composition.source_frame != 0) {
+                    try kv.uint(self.vt_stream, 'r', animation_frame_composition.source_frame);
                 }
                 if (animation_frame_composition.x != 0) {
                     try kv.uint(self.vt_stream, 'x', animation_frame_composition.x);

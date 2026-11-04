@@ -44,9 +44,6 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zmy",
         .root_module = exe_mod,
-        // TODO(thiago): FIXME: https://codeberg.org/ziglang/zig/issues/31272
-        .use_llvm = true,
-        .use_lld = true,
     });
     check_step.dependOn(&exe.step);
 
@@ -54,17 +51,12 @@ pub fn build(b: *std.Build) void {
     install_step.dependOn(&exe_install.step);
 
     const exe_run = b.addRunArtifact(exe);
-    if (b.args) |args| {
-        exe_run.addArgs(args);
-    }
+    exe_run.addPassthruArgs();
     exe_run.step.dependOn(&exe_install.step);
     run_step.dependOn(&exe_run.step);
 
     const exe_test = b.addTest(.{
         .root_module = exe_mod,
-        // TODO(thiago): FIXME: https://codeberg.org/ziglang/zig/issues/31272
-        .use_llvm = true,
-        .use_lld = true,
     });
 
     const exe_test_run = b.addRunArtifact(exe_test);

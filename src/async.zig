@@ -22,7 +22,7 @@ pub fn join(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Canceled }
         while (select.cancel()) |v| {
             switch (v) {
                 inline else => |x, tag| {
-                    const i = @intFromEnum(tag);
+                    const i = @backingInt(tag);
                     if (cancelFn(args[i])) |cancel| {
                         cancel(x);
                     }
@@ -32,13 +32,13 @@ pub fn join(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Canceled }
     }
 
     inline for (0..N) |i| {
-        try select.concurrent(@enumFromInt(i), args[i][0], args[i][1]);
+        try select.concurrent(@fromBackingInt(i), args[i][0], args[i][1]);
     }
 
     for (0..N) |_| {
         switch (try select.await()) {
             inline else => |x, tag| {
-                const i = @intFromEnum(tag);
+                const i = @backingInt(tag);
                 result[i] = x;
                 initialized[i] = true;
             },
@@ -70,7 +70,7 @@ pub fn tryJoin(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Cancele
         while (select.cancel()) |v| {
             switch (v) {
                 inline else => |x, tag| {
-                    const i = @intFromEnum(tag);
+                    const i = @backingInt(tag);
                     if (cancelFn(args[i])) |cancel| {
                         cancel(x);
                     }
@@ -80,13 +80,13 @@ pub fn tryJoin(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Cancele
     }
 
     inline for (0..N) |i| {
-        try select.concurrent(@enumFromInt(i), args[i][0], args[i][1]);
+        try select.concurrent(@fromBackingInt(i), args[i][0], args[i][1]);
     }
 
     for (0..N) |_| {
         switch (try select.await()) {
             inline else => |r, tag| {
-                const i = @intFromEnum(tag);
+                const i = @backingInt(tag);
                 if (r) |x| {
                     result[i] = x;
                     initialized[i] = true;
@@ -119,7 +119,7 @@ pub fn raceOk(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Canceled
         while (select.cancel()) |v| {
             switch (v) {
                 inline else => |x, tag| {
-                    const i = @intFromEnum(tag);
+                    const i = @backingInt(tag);
                     if (cancelFn(args[i])) |cancel| {
                         cancel(x);
                     }
@@ -129,13 +129,13 @@ pub fn raceOk(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Canceled
     }
 
     inline for (0..N) |i| {
-        try select.concurrent(@enumFromInt(i), args[i][0], args[i][1]);
+        try select.concurrent(@fromBackingInt(i), args[i][0], args[i][1]);
     }
 
     for (0..N) |_| {
         switch (try select.await()) {
             inline else => |r, tag| {
-                const i = @intFromEnum(tag);
+                const i = @backingInt(tag);
                 if (r) |x| {
                     return .{ .ok = x };
                 } else |err| {
@@ -160,7 +160,7 @@ pub fn race(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Canceled }
         while (select.cancel()) |v| {
             switch (v) {
                 inline else => |x, tag| {
-                    const i = @intFromEnum(tag);
+                    const i = @backingInt(tag);
                     if (cancelFn(args[i])) |cancel| {
                         cancel(x);
                     }
@@ -170,7 +170,7 @@ pub fn race(io: std.Io, args: anytype) error{ ConcurrencyUnavailable, Canceled }
     }
 
     inline for (0..N) |i| {
-        try select.concurrent(@enumFromInt(i), args[i][0], args[i][1]);
+        try select.concurrent(@fromBackingInt(i), args[i][0], args[i][1]);
     }
 
     switch (try select.await()) {
@@ -266,7 +266,7 @@ fn selectUnion(A: type) type {
     var names: [N][]const u8 = undefined;
     var vals: [N]u32 = undefined;
     var types: [N]type = undefined;
-    var attrs: [N]std.builtin.Type.UnionField.Attributes = undefined;
+    var attrs: [N]std.builtin.Type.Union.FieldAttributes = undefined;
 
     for (0..N) |i| {
         names[i] = std.fmt.comptimePrint("{d}", .{i});
@@ -279,17 +279,17 @@ fn selectUnion(A: type) type {
 }
 
 fn taskType(A: type, i: u32) type {
-    return @typeInfo(A).@"struct".fields[i].type;
+    return @typeInfo(A).@"struct".field_types[i];
 }
 
 fn taskRet(T: type) type {
     return @typeInfo(
-        @typeInfo(T).@"struct".fields[0].type,
+        @typeInfo(T).@"struct".field_types[0],
     ).@"fn".return_type.?;
 }
 
 fn taskCount(A: type) u32 {
-    return @typeInfo(A).@"struct".fields.len;
+    return @typeInfo(A).@"struct".field_types.len;
 }
 
 fn timeoutRet(T: type) type {
@@ -301,7 +301,7 @@ fn timeoutRet(T: type) type {
     } || error_union.error_set)!error_union.payload;
 }
 
-inline fn cancelFn(task: anytype) ?*const fn (@typeInfo(@typeInfo(@TypeOf(task)).@"struct".fields[0].type).@"fn".return_type.?) void {
+inline fn cancelFn(task: anytype) ?*const fn (@typeInfo(@typeInfo(@TypeOf(task)).@"struct".field_types[0]).@"fn".return_type.?) void {
     if (task.len <= 2) return null;
     return task[2];
 }

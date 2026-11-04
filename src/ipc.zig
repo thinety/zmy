@@ -30,7 +30,7 @@ pub const ClientMessage = union(enum(u8)) {
     }
 
     pub fn serialize(value: *const ClientMessage, writer: *std.Io.Writer) !void {
-        try writer.writeInt(@typeInfo(Tag).@"enum".tag_type, @intFromEnum(value.*), .little);
+        try writer.writeInt(@typeInfo(Tag).@"enum".tag_type, @backingInt(value.*), .little);
         switch (value.*) {
             .data => |data| {
                 try writer.writeInt(usize, data.len, .little);
@@ -96,7 +96,7 @@ pub const DaemonMessage = union(enum(u0)) {
     }
 
     pub fn serialize(value: *const DaemonMessage, writer: *std.Io.Writer) !void {
-        try writer.writeInt(@typeInfo(Tag).@"enum".tag_type, @intFromEnum(value.*), .little);
+        try writer.writeInt(@typeInfo(Tag).@"enum".tag_type, @backingInt(value.*), .little);
         switch (value.*) {
             .data => |data| {
                 try writer.writeInt(usize, data.len, .little);

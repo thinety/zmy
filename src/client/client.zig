@@ -75,8 +75,8 @@ pub fn run(
         raw_termios.cflag.CSIZE = .CS8;
         raw_termios.cflag.PARENB = false;
 
-        raw_termios.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw_termios.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+        raw_termios.cc[@backingInt(std.posix.V.MIN)] = 1;
+        raw_termios.cc[@backingInt(std.posix.V.TIME)] = 0;
 
         try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw_termios);
     }
@@ -180,7 +180,7 @@ fn readSignals(
                 error.ReadFailed => return file_reader.err.?,
             };
 
-        switch (@as(std.os.linux.SIG, @enumFromInt(siginfo.signo))) {
+        switch (@as(std.os.linux.SIG, @fromBackingInt(siginfo.signo))) {
             std.os.linux.SIG.WINCH => {
                 const winsize = try getWinsize();
                 const event: Event = .{ .resize = winsize };

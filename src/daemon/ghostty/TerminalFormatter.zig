@@ -30,15 +30,18 @@ pub fn format(
         // some modes we want to emit before and some after, but for now for
         // simplicity we just emit them all before. If we make this more complex
         // later we should add test cases for it.
-        inline for (@typeInfo(ghostty.modes.Mode).@"enum".fields) |field| {
-            const mode: ghostty.modes.Mode = @enumFromInt(field.value);
+        inline for (
+            @typeInfo(ghostty.modes.Mode).@"enum".field_names,
+            @typeInfo(ghostty.modes.Mode).@"enum".field_values,
+        ) |field_name, field_value| {
+            const mode: ghostty.modes.Mode = @fromBackingInt(field_value);
             if (mode == .in_band_size_reports) continue;
             if (mode == .report_visibility) continue;
             const current = self.terminal.modes.get(mode);
-            const default_val = @field(self.terminal.modes.default, field.name);
+            const default_val = @field(self.terminal.modes.default, field_name);
 
             if (current != default_val) {
-                const tag: ghostty.modes.ModeTag = @bitCast(@intFromEnum(mode));
+                const tag: ghostty.modes.ModeTag = @bitCast(@backingInt(mode));
                 const prefix = if (tag.ansi) "" else "?";
                 const suffix = if (current) "h" else "l";
                 try writer.print("\x1b[{s}{d}{s}", .{ prefix, tag.value, suffix });

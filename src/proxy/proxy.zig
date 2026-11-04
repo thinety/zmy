@@ -100,7 +100,7 @@ fn remoteToLocal(
 ) !void {
     // an ipc.ClientMessage.data has at most 4096 bytes (see `client/stdio.zig`).
     // we double that so that all messages are transmitted at once
-    var stream_reader_buffer: [2*4096]u8 = undefined;
+    var stream_reader_buffer: [2 * 4096]u8 = undefined;
     var stream_reader = remote_stream.reader(io, &stream_reader_buffer);
     var stream_writer = local_stream.writer(io, &.{});
 
@@ -136,7 +136,7 @@ fn localToRemote(
     // it's around the same size after going through the VT stream parser, and
     // not accounting for initial hydration or history messages which are a lot
     // less common). we double that so that all messages are transmitted at once.
-    var stream_reader_buffer: [2*64*1024]u8 = undefined;
+    var stream_reader_buffer: [2 * 64 * 1024]u8 = undefined;
     var stream_reader = local_stream.reader(io, &stream_reader_buffer);
     var stream_writer = remote_stream.writer(io, &.{});
 

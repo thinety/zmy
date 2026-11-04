@@ -5,10 +5,6 @@ const client = @import("client/client.zig");
 const daemon = @import("daemon/daemon.zig");
 const proxy = @import("proxy/proxy.zig");
 
-pub const std_options: std.Options = .{
-    // TODO(thiago): FIXME: submit patch to zig (errno=111 below)
-    .unexpected_error_tracing = false,
-};
 const log = std.log.scoped(.zmy);
 
 pub fn main(init: std.process.Init) !void {
@@ -24,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
         else
             "/tmp/zmy";
 
-    std.Io.Dir.cwd().createDir(io, rundir, @enumFromInt(0o755)) catch |err| switch (err) {
+    std.Io.Dir.cwd().createDir(io, rundir, @fromBackingInt(0o755)) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
     };
@@ -33,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
 
     const shell =
         if (environ_map.get("SHELL")) |s|
-            try arena.dupeZ(u8, s)
+            try arena.dupeSentinel(u8, s, 0)
         else
             "/bin/sh";
 
@@ -384,7 +380,7 @@ pub fn connectToSocket(
     while (true) {
         const stream = address.connect(io) catch |err| switch (err) {
             error.FileNotFound,
-            error.Unexpected, // errno=111 ECONNREFUSED
+            error.ConnectionRefused,
             => |e| {
                 if (retries == 2) return e;
                 if (retries == 0) try spawnDaemon(rundir, session_name);
