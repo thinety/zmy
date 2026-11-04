@@ -11,6 +11,19 @@ const terminfo = @import("terminfo.zig");
 // - no_forward(color_operation)
 // - no_forward(kitty_color_report)
 //
+// kitty clipboard (OSC 5522) requires interactive user approval
+// (OTP grants) at the client, and forwarding read requests would
+// yield one reply per attached client.
+// kitty dnd (OSC 72) is in a similar situation, since there are
+// messages from the app to the terminal (drag answer, drop conclusion).
+// - no_forward(kitty_clipboard)
+// - no_forward(kitty_dnd)
+//
+// we also do not forward DECRQCRA and XTCHECKSUM sequences because a
+// program can use them to read the whole content of the screen, including
+// output from other programs.
+// - no_forward(xt_checksum)
+//
 // other than that, the general rationale is that if we somehow reply by
 // writing to `self.pty`, then we do *not* forward to `self.vt_stream`,
 // exactly because we want to avoid duplicate answers from the upstream
@@ -21,6 +34,7 @@ const terminfo = @import("terminfo.zig");
 // - no_forward(kitty_keyboard_query)
 // - no_forward(request_mode)
 // - no_forward(size_report)
+// - no_forward(program_status)
 // - no_forward(xtversion)
 // - no_forward(dcs)
 // - no_forward(in_band_size_reports)
@@ -510,6 +524,9 @@ pub const Handler = struct {
 
                 try self.vt_stream.print("\x1b[>{d}s", .{@as(u8, if (value) 1 else 0)});
             },
+            .xt_checksum_extension => {
+                // no_forward(xt_checksum)
+            },
             .kitty_keyboard_push => {
                 self.terminal.screens.active.kitty_keyboard.push(value.flags);
 
@@ -573,6 +590,11 @@ pub const Handler = struct {
                 try self.terminal.decaln();
 
                 try self.vt_stream.writeAll("\x1b#8");
+            },
+            .soft_reset => {
+                self.terminal.softReset();
+
+                try self.vt_stream.writeAll("\x1b[!p");
             },
             .full_reset => {
                 self.terminal.fullReset();
@@ -654,6 +676,13 @@ pub const Handler = struct {
                     .zoom_out => "zoom-out",
                 };
                 try self.vt_stream.print("\x1b]22;{s}\x1b\\", .{name});
+            },
+            .mouse_shape_reset => {
+                self.terminal.mouse_shape = .text;
+
+                // Reset is the shape-less form of the OSC we re-emit for
+                // mouse_shape above.
+                try self.vt_stream.writeAll("\x1b]22;\x1b\\");
             },
             .color_operation => {
                 // no_forward(color_operation)
@@ -815,202 +844,8 @@ pub const Handler = struct {
                     }
                 }
             },
-
-            // Effect-based handlers
-            .bell => {
-                try self.vt_stream.writeByte(0x07);
-            },
-            .show_desktop_notification => {
-                try self.vt_stream.print("\x1b]9;{s};{s}\x1b\\", .{ value.title, value.body });
-            },
-            .device_attributes => {
-                // no_forward(device_attributes): we simply answer the query.
-                // we don't want to forward to avoid multiple answers from
-                // connected clients.
-                const DeviceAttributes = @typeInfo(
-                    @typeInfo(
-                        @typeInfo(
-                            @FieldType(
-                                ghostty.TerminalStream.Handler.Effects,
-                                "device_attributes",
-                            ),
-                        ).optional.child,
-                    ).pointer.child,
-                ).@"fn".return_type.?;
-                const attrs: DeviceAttributes = .{};
-                try attrs.encode(value, self.pty);
-            },
-            .device_status => {
-                // no_forward(device_status): we answer all queries except for
-                // the palette ones - again, we want to be palette-agnostic.
-                switch (value.request) {
-                    .operating_status => try self.pty.writeAll("\x1B[0n"),
-
-                    .cursor_position => {
-                        const pos: struct {
-                            x: usize,
-                            y: usize,
-                        } = if (self.terminal.modes.get(.origin)) .{
-                            .x = self.terminal.screens.active.cursor.x -| self.terminal.scrolling_region.left,
-                            .y = self.terminal.screens.active.cursor.y -| self.terminal.scrolling_region.top,
-                        } else .{
-                            .x = self.terminal.screens.active.cursor.x,
-                            .y = self.terminal.screens.active.cursor.y,
-                        };
-
-                        try self.pty.print("\x1B[{};{}R", .{
-                            pos.y + 1,
-                            pos.x + 1,
-                        });
-                    },
-                    // TODO(thiago): ghostty 1.4.0
-                    .cursor_position_extended => {},
-
-                    .color_scheme => {},
-
-                    .visibility => {
-                        try ghostty.device_status.encodeVisibilityReport(
-                            self.pty,
-                            if (self.terminal.flags.visible) .potentially_visible else .not_visible,
-                        );
-                    },
-                }
-            },
-            .enquiry => {
-                // no_forward(enquiry)
-                // TODO(thiago): do we need to answer this? ENQ (0x05)
-            },
-            .kitty_keyboard_query => {
-                // no_forward(kitty_keyboard_query)
-                try self.pty.print("\x1b[?{}u", .{
-                    self.terminal.screens.active.kitty_keyboard.current().int(),
-                });
-            },
-            .request_mode => {
-                // no_forward(request_mode)
-                const report = self.terminal.modes.getReport(.fromMode(value.mode));
-                try report.encode(self.pty);
-            },
-            .request_mode_unknown => {
-                // no_forward(request_mode)
-                const report = self.terminal.modes.getReport(.{
-                    .value = @truncate(value.mode),
-                    .ansi = value.ansi,
-                });
-                try report.encode(self.pty);
-            },
-            .size_report => {
-                // no_forward(size_report)
-                switch (value) {
-                    .csi_21_t => {
-                        const title = self.terminal.getTitle() orelse "";
-                        try self.pty.print("\x1b]l{s}\x1b\\", .{title});
-                    },
-
-                    .csi_14_t, .csi_16_t, .csi_18_t => {
-                        const report_style: ghostty.size_report.Style = switch (value) {
-                            .csi_14_t => .csi_14_t,
-                            .csi_16_t => .csi_16_t,
-                            .csi_18_t => .csi_18_t,
-                            .csi_21_t => unreachable,
-                            // TODO(thiago): ghostty 1.4.0
-                            .csi_19_t => unreachable,
-                        };
-                        try ghostty.size_report.encode(self.pty, report_style, .{
-                            .rows = self.terminal.rows,
-                            .columns = self.terminal.cols,
-                            .cell_width = self.terminal.width_px / self.terminal.cols,
-                            .cell_height = self.terminal.height_px / self.terminal.rows,
-                        });
-                    },
-
-                    // TODO(thiago): ghostty 1.4.0
-                    .csi_19_t => {},
-                }
-            },
-            .window_title => {
-                // Prevent DoS attacks by limiting title length.
-                const max_title_len = 1024;
-                const title = if (value.title.len > max_title_len) title: {
-                    std.log.warn("title length {d} exceeds max length {d}, truncating", .{
-                        value.title.len,
-                        max_title_len,
-                    });
-                    break :title value.title[0..max_title_len];
-                } else value.title;
-
-                try self.terminal.setTitle(title);
-
-                try self.vt_stream.print("\x1b]0;{s}\x1b\\", .{title});
-            },
-            .report_pwd => {
-                // Prevent DoS attacks by limiting url length. Headroom for
-                // Linux PATH_MAX (4096) plus URI scheme/host and percent-encoding.
-                const max_url_len = 4096;
-                const url = if (value.url.len > max_url_len) url: {
-                    std.log.warn("pwd url length {d} exceeds max length {d}, truncating", .{
-                        value.url.len,
-                        max_url_len,
-                    });
-                    break :url value.url[0..max_url_len];
-                } else value.url;
-
-                // We store the raw payload unparsed. Embedders read it via
-                // getPwd() and are responsible for decoding any URI scheme.
-                try self.terminal.setPwd(url);
-
-                try self.vt_stream.print("\x1b]7;{s}\x1b\\", .{url});
-            },
-            .progress_report => {
-                // Re-emit the ConEmu OSC 9;4 progress report. The state is
-                // encoded as its integer value and the optional progress
-                // percentage is appended when present.
-                try self.vt_stream.print("\x1b]9;4;{d}", .{@backingInt(value.state)});
-                if (value.progress) |p| {
-                    try self.vt_stream.print(";{d}", .{p});
-                }
-                try self.vt_stream.writeAll("\x1b\\");
-            },
-            .xtversion => {
-                // no_forward(xtversion)
-                const version = constants.PROGRAM_NAME ++ " " ++ constants.PROGRAM_VERSION;
-                try self.pty.print("\x1BP>|{s}\x1B\\", .{version});
-            },
-            .clipboard_contents => {
-                // Read requests are deliberately not forwarded; see the effect docs.
-                if (value.data.len == 1 and value.data[0] == '?') return;
-
-                try self.vt_stream.print("\x1b]52;{c};{s}\x1b\\", .{ value.kind, value.data });
-            },
-
-            // DCS
-            .dcs_hook, .dcs_put, .dcs_unhook => |a| {
-                // no_forward(dcs)
-
-                var cmd = switch (a) {
-                    .dcs_hook => self.dcs_handler.hook(self.gpa, value),
-                    .dcs_put => self.dcs_handler.put(value),
-                    .dcs_unhook => self.dcs_handler.unhook(),
-                    else => unreachable,
-                } orelse return;
-                defer cmd.deinit();
-
-                switch (cmd) {
-                    .decrqss => |request| {
-                        var response: [ghostty.dcs.Command.DECRQSS.max_response_bytes]u8 = undefined;
-                        const encoded = try request.encode(self.terminal, &response);
-                        try self.pty.writeAll(encoded);
-                    },
-
-                    .xtgettcap => |*gettcap| {
-                        const map = comptime terminfo.zmy.xtgettcapMap();
-                        while (gettcap.next()) |key| {
-                            try self.pty.writeAll(map.get(key) orelse continue);
-                        }
-                    },
-
-                    .tmux => {},
-                }
+            .kitty_clipboard => {
+                // no_forward(kitty_clipboard)
             },
 
             // APC
@@ -1060,6 +895,259 @@ pub const Handler = struct {
                 }
             },
 
+            // osc_unknown is never emitted: the parser is created with
+            // the default osc_unknown_max_bytes = 0 (see daemon.zig).
+            .osc_unknown => unreachable,
+
+            // Effect-based handlers
+            .bell => {
+                try self.vt_stream.writeByte(0x07);
+            },
+            .show_desktop_notification => {
+                try self.vt_stream.print("\x1b]9;{s};{s}\x1b\\", .{ value.title, value.body });
+            },
+            .device_attributes => {
+                // no_forward(device_attributes): we simply answer the query.
+                // we don't want to forward to avoid multiple answers from
+                // connected clients.
+                const DeviceAttributes = @typeInfo(
+                    @typeInfo(
+                        @typeInfo(
+                            @FieldType(
+                                ghostty.TerminalStream.Handler.Effects,
+                                "device_attributes",
+                            ),
+                        ).optional.child,
+                    ).pointer.child,
+                ).@"fn".return_type.?;
+                const attrs: DeviceAttributes = .{};
+                try attrs.encode(value, self.pty);
+            },
+            .device_status => {
+                // no_forward(device_status): we answer all queries except for
+                // the palette ones - again, we want to be palette-agnostic.
+                switch (value.request) {
+                    .operating_status => try self.pty.writeAll("\x1B[0n"),
+
+                    .cursor_position, .cursor_position_extended => {
+                        const pos: struct {
+                            x: usize,
+                            y: usize,
+                        } = if (self.terminal.modes.get(.origin)) .{
+                            .x = self.terminal.screens.active.cursor.x -| self.terminal.scrolling_region.left,
+                            .y = self.terminal.screens.active.cursor.y -| self.terminal.scrolling_region.top,
+                        } else .{
+                            .x = self.terminal.screens.active.cursor.x,
+                            .y = self.terminal.screens.active.cursor.y,
+                        };
+
+                        switch (value.request) {
+                            .cursor_position => {
+                                try self.pty.print("\x1B[{};{}R", .{
+                                    pos.y + 1,
+                                    pos.x + 1,
+                                });
+                            },
+                            // DECXCPR: the extended report adds a page number.
+                            // Ghostty has no page memory, so the page is
+                            // always 1.
+                            .cursor_position_extended => {
+                                try self.pty.print("\x1B[?{};{};1R", .{
+                                    pos.y + 1,
+                                    pos.x + 1,
+                                });
+                            },
+                            else => unreachable,
+                        }
+                    },
+
+                    .color_scheme => {},
+
+                    .visibility => {
+                        try ghostty.device_status.encodeVisibilityReport(
+                            self.pty,
+                            if (self.terminal.flags.visible) .potentially_visible else .not_visible,
+                        );
+                    },
+                }
+            },
+            .enquiry => {
+                // no_forward(enquiry)
+                // TODO(thiago): do we need to answer this? ENQ (0x05)
+            },
+            .kitty_keyboard_query => {
+                // no_forward(kitty_keyboard_query)
+                try self.pty.print("\x1b[?{}u", .{
+                    self.terminal.screens.active.kitty_keyboard.current().int(),
+                });
+            },
+            .request_mode => {
+                // no_forward(request_mode)
+                var report = self.terminal.modes.getReport(.fromMode(value.mode));
+
+                // Kitty paste events (mode 5522) can't work without kitty
+                // clipboard support, which we don't have, so report it as
+                // unrecognized - as ghostty does when no clipboard read
+                // effect is configured.
+                if (value.mode == .kitty_paste_events) {
+                    report.state = .not_recognized;
+                }
+
+                try report.encode(self.pty);
+            },
+            .request_mode_unknown => {
+                // no_forward(request_mode)
+                const report = self.terminal.modes.getReport(.{
+                    .value = value.mode,
+                    .ansi = value.ansi,
+                });
+                try report.encode(self.pty);
+            },
+            .size_report => {
+                // no_forward(size_report)
+                switch (value) {
+                    .csi_21_t => {
+                        const title = self.terminal.getTitle() orelse "";
+                        try self.pty.print("\x1b]l{s}\x1b\\", .{title});
+                    },
+
+                    .csi_14_t, .csi_16_t, .csi_18_t, .csi_19_t => {
+                        const report_style: ghostty.size_report.Style = switch (value) {
+                            .csi_14_t => .csi_14_t,
+                            .csi_16_t => .csi_16_t,
+                            .csi_18_t => .csi_18_t,
+                            .csi_19_t => .csi_19_t,
+                            .csi_21_t => unreachable,
+                        };
+                        try ghostty.size_report.encode(self.pty, report_style, .{
+                            .rows = self.terminal.rows,
+                            .columns = self.terminal.cols,
+                            .cell_width = self.terminal.width_px / self.terminal.cols,
+                            .cell_height = self.terminal.height_px / self.terminal.rows,
+                        });
+                    },
+                }
+            },
+            .window_title => {
+                // Prevent DoS attacks by limiting title length.
+                const max_title_len = 1024;
+                const title = if (value.title.len > max_title_len) title: {
+                    std.log.warn("title length {d} exceeds max length {d}, truncating", .{
+                        value.title.len,
+                        max_title_len,
+                    });
+                    break :title value.title[0..max_title_len];
+                } else value.title;
+
+                try self.terminal.setTitle(title);
+
+                try self.vt_stream.print("\x1b]0;{s}\x1b\\", .{title});
+            },
+            .report_pwd => {
+                // Prevent DoS attacks by limiting url length. Headroom for
+                // Linux PATH_MAX (4096) plus URI scheme/host and percent-encoding.
+                const max_url_len = 4096;
+                const url = if (value.url.len > max_url_len) url: {
+                    std.log.warn("pwd url length {d} exceeds max length {d}, truncating", .{
+                        value.url.len,
+                        max_url_len,
+                    });
+                    break :url value.url[0..max_url_len];
+                } else value.url;
+
+                // We store the raw payload unparsed. Embedders read it via
+                // getPwd() and are responsible for decoding any URI scheme.
+                try self.terminal.setPwd(url);
+
+                try self.vt_stream.print("\x1b]7;{s}\x1b\\", .{url});
+            },
+            .progress_report => {
+                // Re-emit the ConEmu OSC 9;4 progress report. The state is
+                // encoded as its integer value and the optional progress
+                // percentage is appended when present.
+                try self.vt_stream.print("\x1b]9;4;{d}", .{@backingInt(value.state)});
+                if (value.progress) |p| {
+                    try self.vt_stream.print(";{d}", .{p});
+                }
+                try self.vt_stream.writeAll("\x1b\\");
+            },
+            .program_status => {
+                switch (value) {
+                    // no_forward(program_status): we answer support
+                    // queries ourselves, claiming support because we
+                    // forward the reports below.
+                    .query => |terminator| switch (terminator) {
+                        inline else => |t| try self.pty.writeAll(
+                            "\x1b]7501;" ++
+                                ghostty.osc.program_status.query_reply ++
+                                comptime t.string(),
+                        ),
+                    },
+                    // Reports carry no state we need to keep; forward the
+                    // validated body so attached clients can display it.
+                    .report => |report| try self.vt_stream.print(
+                        "\x1b]7501;{s}\x1b\\",
+                        .{report.data},
+                    ),
+                }
+            },
+            .resize_window => {
+                // Re-emit the XTWINOPS resize request (CSI 8 ; height ;
+                // width t) so attached clients resize their window. A
+                // zero parameter means "unchanged" for that dimension,
+                // so we forward both values verbatim. The daemon's own
+                // terminal is not resized here: it follows via the
+                // client-driven resize path (Handler.resize).
+                try self.vt_stream.print("\x1b[8;{d};{d}t", .{ value.rows, value.columns });
+            },
+            .xtversion => {
+                // no_forward(xtversion)
+                const version = constants.PROGRAM_NAME ++ " " ++ constants.PROGRAM_VERSION;
+                try self.pty.print("\x1BP>|{s}\x1B\\", .{version});
+            },
+            .request_xt_checksum => {
+                // no_forward(xt_checksum)
+            },
+            .clipboard_contents => {
+                // Read requests are deliberately not forwarded; see the effect docs.
+                if (value.data.len == 1 and value.data[0] == '?') return;
+
+                try self.vt_stream.print("\x1b]52;{c};{s}\x1b\\", .{ value.kind, value.data });
+            },
+            .kitty_dnd => {
+                // no_forward(kitty_dnd)
+            },
+
+            // DCS
+            .dcs_hook, .dcs_put, .dcs_unhook => |a| {
+                // no_forward(dcs)
+
+                var cmd = switch (a) {
+                    .dcs_hook => self.dcs_handler.hook(self.gpa, value),
+                    .dcs_put => self.dcs_handler.put(value),
+                    .dcs_unhook => self.dcs_handler.unhook(),
+                    else => unreachable,
+                } orelse return;
+                defer cmd.deinit();
+
+                switch (cmd) {
+                    .decrqss => |request| {
+                        var response: [ghostty.dcs.Command.DECRQSS.max_response_bytes]u8 = undefined;
+                        const encoded = try request.encode(self.terminal, &response);
+                        try self.pty.writeAll(encoded);
+                    },
+
+                    .xtgettcap => |*gettcap| {
+                        const map = comptime terminfo.zmy.xtgettcapMap();
+                        while (gettcap.next()) |key| {
+                            try self.pty.writeAll(map.get(key) orelse continue);
+                        }
+                    },
+
+                    .tmux => {},
+                }
+            },
+
             // Have no terminal-modifying effect
             .title_push => {
                 try self.vt_stream.print("\x1b[22;0;{d}t", .{value});
@@ -1067,22 +1155,14 @@ pub const Handler = struct {
             .title_pop => {
                 try self.vt_stream.print("\x1b[23;0;{d}t", .{value});
             },
-
-            // TODO(thiago): ghostty 1.4.0
-            .kitty_clipboard,
-            .kitty_dnd,
-            .resize_window,
-            .osc_unknown,
-            .mouse_shape_reset,
-            .request_xt_checksum,
-            .xt_checksum_extension,
-            .program_status,
-            .soft_reset,
-            => {},
         }
     }
 
     fn setMode(self: *Handler, mode: ghostty.modes.Mode, enabled: bool) !void {
+        if (mode == .kitty_paste_events) {
+            return;
+        }
+
         // Set the mode on the terminal
         self.terminal.modes.set(mode, enabled);
 
@@ -1232,8 +1312,7 @@ pub const Handler = struct {
                 try self.forwardMode(m, enabled);
             },
 
-            // TODO(thiago): ghostty 1.4.0
-            .kitty_paste_events => {},
+            .kitty_paste_events => unreachable,
         }
     }
 

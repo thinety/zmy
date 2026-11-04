@@ -161,6 +161,7 @@ fn mainLoop(
     var vt_stream: ghostty.Stream(*stream_mod.Handler) = .init(.{
         .allocator = gpa,
         .handler = &vt_stream_handler,
+        .osc_unknown_max_bytes = 0,
     });
     defer vt_stream.deinit();
 
