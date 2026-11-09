@@ -40,7 +40,7 @@ pub fn run(
 ) !void {
     try closeStderrIfTty();
     defer {
-        var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+        var stdout_writer = std.Io.File.stdout().writerStreaming(io, &.{});
 
         stdout_writer.interface.writeAll("\x1bc") catch |err| switch (err) {
             error.WriteFailed => {

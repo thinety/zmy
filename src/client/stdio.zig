@@ -7,7 +7,7 @@ pub fn readStdin(
     event_queue: *std.Io.Queue(client.Event),
 ) !void {
     var stdin_reader_buffer: [4096]u8 = undefined;
-    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_reader_buffer);
+    var stdin_reader = std.Io.File.stdin().readerStreaming(io, &stdin_reader_buffer);
 
     while (true) {
         stdin_reader.interface.fillMore() catch |err|
@@ -32,7 +32,7 @@ pub fn writeStdout(
     io: std.Io,
     stdout_queue: *std.Io.Queue([]u8),
 ) !void {
-    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &.{});
 
     while (true) {
         const data = try stdout_queue.getOne(io);

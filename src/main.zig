@@ -113,7 +113,7 @@ fn help(io: std.Io) !void {
         \\
     ;
 
-    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &.{});
 
     stdout_writer.interface.writeAll(help_text) catch |err|
         switch (err) {
@@ -216,7 +216,7 @@ fn runSend(
     const stream = try connectToSocket(gpa, io, rundir, session_name);
     defer stream.close(io);
 
-    var stdin_reader = std.Io.File.stdin().reader(io, &.{});
+    var stdin_reader = std.Io.File.stdin().readerStreaming(io, &.{});
     var stdin_buffer: std.Io.Writer.Allocating = .init(gpa);
     defer stdin_buffer.deinit();
 
@@ -267,7 +267,7 @@ fn runHistory(
 
     switch (daemon_message) {
         .data => |data| {
-            var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+            var stdout_writer = std.Io.File.stdout().writerStreaming(io, &.{});
 
             stdout_writer.interface.writeAll(data) catch |err|
                 switch (err) {
@@ -305,7 +305,7 @@ fn runList(
         try session_names.append(gpa, session_name);
     }
 
-    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &.{});
 
     if (session_names.items.len == 0) {
         stdout_writer.interface.print(
@@ -341,7 +341,7 @@ fn runDetach(
     io: std.Io,
     client_id: []const u8,
 ) !void {
-    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &.{});
 
     stdout_writer.interface.print(
         "\x1b_zmy;detach;{s}\x1b\\",
@@ -355,7 +355,7 @@ fn runDetach(
 fn runTrace(
     io: std.Io,
 ) !void {
-    var stdout_writer = std.Io.File.stdout().writer(io, &.{});
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &.{});
 
     stdout_writer.interface.writeAll(
         "\x1b_zmy;trace\x1b\\\x1b]52;c;\x1b\\",
