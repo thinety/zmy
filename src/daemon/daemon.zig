@@ -148,6 +148,7 @@ fn mainLoop(
     var term = try ghostty.Terminal.init(io, gpa, .{
         .cols = last_winsize.col,
         .rows = last_winsize.row,
+        .max_scrollback_bytes = 16_777_216, // 16 MiB
     });
     defer term.deinit(gpa);
 
