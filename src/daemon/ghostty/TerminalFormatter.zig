@@ -30,18 +30,19 @@ pub fn format(
         // some modes we want to emit before and some after, but for now for
         // simplicity we just emit them all before. If we make this more complex
         // later we should add test cases for it.
-        inline for (
-            @typeInfo(ghostty.modes.Mode).@"enum".field_names,
-            @typeInfo(ghostty.modes.Mode).@"enum".field_values,
-        ) |field_name, field_value| {
-            const mode: ghostty.modes.Mode = @fromBackingInt(field_value);
+        inline for (std.enums.values(ghostty.modes.Mode)) |mode| {
             if (mode == .in_band_size_reports) continue;
             if (mode == .report_visibility) continue;
-            const current = self.terminal.modes.get(mode);
-            const default_val = @field(self.terminal.modes.default, field_name);
 
-            if (current != default_val) {
-                const tag: ghostty.modes.ModeTag = @bitCast(@backingInt(mode));
+            if (mode == .alt_screen_legacy) continue;
+            if (mode == .alt_screen) continue;
+            if (mode == .alt_screen_save_cursor_clear_enter) continue;
+
+            const current = self.terminal.modes.get(mode);
+            const default = self.terminal.modes.getDefault(mode);
+
+            if (current != default) {
+                const tag = ghostty.modes.ModeTag.fromMode(mode);
                 const prefix = if (tag.ansi) "" else "?";
                 const suffix = if (current) "h" else "l";
                 try writer.print("\x1b[{s}{d}{s}", .{ prefix, tag.value, suffix });
@@ -49,7 +50,31 @@ pub fn format(
         }
     }
 
-    try self.formatScreen(self.terminal.screens.active, writer);
+    if (self.emit == .vt) {
+        try self.formatScreen(self.terminal.screens.get(.primary).?, writer);
+
+        if (self.terminal.screens.active_key == .alternate) {
+            inline for (.{
+                .alt_screen_legacy,
+                .alt_screen,
+                .alt_screen_save_cursor_clear_enter,
+            }) |mode| {
+                const current = self.terminal.modes.get(mode);
+                const default = self.terminal.modes.getDefault(mode);
+
+                if (current != default) {
+                    const tag = ghostty.modes.ModeTag.fromMode(mode);
+                    const prefix = if (tag.ansi) "" else "?";
+                    const suffix = if (current) "h" else "l";
+                    try writer.print("\x1b[{s}{d}{s}", .{ prefix, tag.value, suffix });
+                }
+            }
+
+            try self.formatScreen(self.terminal.screens.get(.alternate).?, writer);
+        }
+    } else {
+        try self.formatScreen(self.terminal.screens.active, writer);
+    }
 
     if (self.emit == .vt) {
         // Extra terminal state to emit after the screen contents so that
