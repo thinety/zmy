@@ -5,7 +5,7 @@ const Self = @This();
 
 pub const Format = union(enum) {
     plain: usize,
-    vt,
+    vt: usize,
 };
 
 terminal: *const ghostty.Terminal,
@@ -134,6 +134,19 @@ fn formatScreen(
         while (it.next()) |pin| {
             try self.formatRow(pin, &row_state, writer);
         }
+
+        switch (self.emit) {
+            .plain => {
+                try writer.writeAll("\n");
+            },
+            .vt => |lines| {
+                for (0..lines) |_| {
+                    row_state.blank_cells = 0;
+                    row_state.blank_rows += 1;
+                }
+                try self.emitBlank(&row_state, writer);
+            },
+        }
     }
 
     if (self.emit == .vt) {
@@ -247,6 +260,7 @@ fn formatScreen(
 const RowState = struct {
     first_row: bool = true,
     blank_cells: usize = 0,
+    blank_rows: usize = 0,
     style: ghostty.Style = .{},
 };
 
@@ -261,29 +275,8 @@ fn formatRow(
     const cells = page.getCells(row);
 
     if (!state.first_row and !row.wrap_continuation) {
-        // This row doesn't continue a wrap, so we need to reset
-        // our blank cell count. When it is the first row, the blank
-        // cell count is also zero.
         state.blank_cells = 0;
-
-        // Add a newline if not the first row and not continuing a wrap.
-
-        if (self.emit == .vt) {
-            // Reset style before emitting newlines to prevent background
-            // colors from bleeding into the next line's leading cells.
-            if (!state.style.default()) {
-                state.style = .{};
-                try writer.print("{f}", .{state.style.formatterVt()});
-            }
-        }
-        switch (self.emit) {
-            .plain => {
-                try writer.writeAll("\n");
-            },
-            .vt => {
-                try writer.writeAll("\r\n");
-            },
-        }
+        state.blank_rows += 1;
     }
     state.first_row = false;
 
@@ -296,37 +289,26 @@ fn formatRow(
             .narrow, .wide => {},
         }
 
-        // If we have a zero value, then we accumulate a counter. We
-        // only want to turn zero values into spaces if we have a non-zero
-        // char sometime later.
-        // If we're emitting styled output (not plaintext) and
-        // the cell has some kind of styling or is not empty
-        // then this isn't blank.
-        // Cells with no text are blank
-        const is_blank = switch (cell.content_tag) {
-            .codepoint, .codepoint_grapheme => switch (self.emit) {
-                .plain => !cell.hasText(),
-                .vt => !cell.hasText() and !cell.hasStyling(),
-            },
-            .bg_color_palette, .bg_color_rgb => switch (self.emit) {
-                .plain => true,
-                .vt => false,
-            },
+        const has_styling = self.emit == .vt and switch (cell.content_tag) {
+            .codepoint, .codepoint_grapheme => cell.style_id != 0,
+            .bg_color_palette, .bg_color_rgb => true,
         };
-        if (is_blank) {
+        const has_text = switch (cell.content_tag) {
+            .codepoint, .codepoint_grapheme => cell.content.codepoint.data != 0,
+            .bg_color_palette, .bg_color_rgb => false,
+        };
+
+        if (!has_styling and !has_text) {
             state.blank_cells += 1;
             continue;
         }
-        if (state.blank_cells > 0) {
-            try writer.splatByteAll(' ', state.blank_cells);
-            state.blank_cells = 0;
-        }
+        try self.emitBlank(state, writer);
 
         if (self.emit == .vt) {
             const cell_style: ghostty.Style = switch (cell.content_tag) {
                 .codepoint,
                 .codepoint_grapheme,
-                => if (cell.hasStyling())
+                => if (has_styling)
                     page.styles.get(page.memory, cell.style_id).*
                 else
                     .{},
@@ -351,26 +333,45 @@ fn formatRow(
             }
         }
 
-        switch (cell.content_tag) {
-            .codepoint, .codepoint_grapheme => {
-                if (!cell.hasText()) {
-                    try writer.writeByte(' ');
-                } else {
-                    try writer.print("{u}", .{cell.content.codepoint.data});
+        if (has_text) {
+            try writer.print("{u}", .{cell.content.codepoint.data});
+            if (page.lookupGrapheme(cell)) |grapheme| {
+                for (grapheme) |cp| {
+                    try writer.print("{u}", .{cp});
                 }
-                if (page.lookupGrapheme(cell)) |grapheme| {
-                    for (grapheme) |cp| {
-                        try writer.print("{u}", .{cp});
-                    }
-                }
-            },
-            .bg_color_palette, .bg_color_rgb => {
-                try writer.writeByte(' ');
-            },
+            }
+        } else {
+            try writer.writeByte(' ');
         }
 
         // TODO(thiago): cell.hyperlink
 
         // TODO(thiago): cell.semantic_content
+    }
+}
+
+fn emitBlank(
+    self: *const Self,
+    state: *RowState,
+    writer: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    if (state.blank_rows > 0 or state.blank_cells > 0) {
+        if (self.emit == .vt) {
+            // Reset style before emitting newlines to prevent background
+            // colors from bleeding into the next line's leading cells.
+            if (!state.style.default()) {
+                state.style = .{};
+                try writer.print("{f}", .{state.style.formatterVt()});
+            }
+        }
+
+        try writer.splatBytesAll(switch (self.emit) {
+            .plain => "\n",
+            .vt => "\r\n",
+        }, state.blank_rows);
+        state.blank_rows = 0;
+
+        try writer.splatByteAll(' ', state.blank_cells);
+        state.blank_cells = 0;
     }
 }

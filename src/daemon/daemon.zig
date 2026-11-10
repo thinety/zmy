@@ -271,7 +271,7 @@ fn mainLoop(
 
                             const terminal_formatter: TerminalFormatter = .init(
                                 &term,
-                                .vt,
+                                .{ .vt = winsize.row - last_winsize.row },
                             );
                             try terminal_formatter.format(&allocating.writer);
 
