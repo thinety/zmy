@@ -311,20 +311,24 @@ fn mainLoop(
                 // raised on both graceful exit (inner pty closed because shell exited)
                 // and error conditions (client attached recursively or they're too slow).
 
+                const has_resized = client.winsize != null;
+
                 clients.remove(&client.node);
                 client.deinit(gpa, io);
                 gpa.destroy(client);
 
-                try doResize(
-                    gpa,
-                    io,
-                    clients,
-                    &vt_stream_handler,
-                    pty,
-                    last_winsize,
-                    &pty_buffer,
-                    ptyin_queue,
-                );
+                if (has_resized) {
+                    try doResize(
+                        gpa,
+                        io,
+                        clients,
+                        &vt_stream_handler,
+                        pty,
+                        last_winsize,
+                        &pty_buffer,
+                        ptyin_queue,
+                    );
+                }
             },
             .ptyout => |data| {
                 defer gpa.free(data);
