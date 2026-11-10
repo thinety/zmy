@@ -120,10 +120,24 @@ fn formatScreen(
         var tl = screen.pages.getTopLeft(.screen);
         switch (self.emit) {
             .plain => |lines| {
-                const br = screen.pages.getBottomRight(.screen).?;
-                var it = br.rowIterator(.left_up, null);
-                for (0..lines) |_| {
-                    tl = it.next() orelse break;
+                if (lines > 0) {
+                    const br = screen.pages.getBottomRight(.screen).?;
+                    var it = br.rowIterator(.left_up, null);
+
+                    var empty = true;
+                    while (empty) {
+                        tl = it.next() orelse break;
+                        for (tl.cells(.all)) |cell| {
+                            if (cell.hasText()) {
+                                empty = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    for (0..lines - 1) |_| {
+                        tl = it.next() orelse break;
+                    }
                 }
             },
             .vt => {},
