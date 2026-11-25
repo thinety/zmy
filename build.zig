@@ -1,4 +1,5 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -9,8 +10,10 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the program");
     const test_step = b.step("test", "Run tests");
 
-    const translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("src/c.h"),
+    const translate_c = b.dependency("translate_c", .{});
+
+    const translator: Translator = .init(translate_c, .{
+        .c_source_file = b.path("src/c.h"),
         .target = target,
         .optimize = optimize,
     });
@@ -28,7 +31,7 @@ pub fn build(b: *std.Build) void {
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .imports = &.{
-            .{ .name = "c", .module = translate_c.createModule() },
+            .{ .name = "c", .module = translator.mod },
             .{ .name = "ghostty-vt", .module = ghostty.module("ghostty-vt") },
         },
         .target = target,

@@ -2,11 +2,15 @@
     .name = .zmy,
     .version = "0.1.0",
     .fingerprint = 0x5fade8e695806b16, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .ghostty = .{
-            .url = "git+https://github.com/ghostty-org/ghostty.git#83fb95624b0439ee660c2679b43b38c8b63769cd",
-            .hash = "ghostty-1.4.0-5UdBC-qohwWqLS0BImOz05t4hVyTwbaKslyTPvKYvAtE",
+            .url = "git+https://github.com/ghostty-org/ghostty.git?ref=vt-1.0.2#573c4a21e02311ae87844af26b6a7a179f82858e",
+            .hash = "ghostty-1.4.1-dev-5UdBCxbdqAWvTbEDu8LHIX61u3JHpYit3s8zjCphO4mh",
+        },
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c?ref=zig-0.17.x#cfac21f3199b2b02ce3fd7db652aa456421fe4ab",
+            .hash = "translate_c-2.0.2-Q_BUWvBNBwDnyehSiuAJmdFcMYHYGA-Jc3KiYdrV2Dqx",
         },
     },
     .paths = .{

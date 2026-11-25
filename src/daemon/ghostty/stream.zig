@@ -24,6 +24,11 @@ const terminfo = @import("terminfo.zig");
 // output from other programs.
 // - no_forward(xt_checksum)
 //
+// unknown SGR attributes are not forwarded because we can't map them to
+// a known sequence, and re-emitting their raw parameters could interfere
+// with the canonical attributes we do forward.
+// - no_forward(unknown_sgr)
+//
 // other than that, the general rationale is that if we somehow reply by
 // writing to `self.pty`, then we do *not* forward to `self.vt_stream`,
 // exactly because we want to avoid duplicate answers from the upstream
@@ -164,6 +169,16 @@ pub const Handler = struct {
                 self.terminal.reverseIndex();
 
                 try self.vt_stream.writeAll("\x1bM");
+            },
+            .back_index => {
+                self.terminal.backIndex();
+
+                try self.vt_stream.writeAll("\x1b6");
+            },
+            .forward_index => {
+                self.terminal.forwardIndex();
+
+                try self.vt_stream.writeAll("\x1b9");
             },
             .cursor_up => {
                 self.terminal.cursorUp(value.value);
@@ -312,6 +327,20 @@ pub const Handler = struct {
                 if (@max(1, value) != 1) try self.vt_stream.print("{d}", .{@max(1, value)});
                 try self.vt_stream.writeByte('@');
             },
+            .insert_columns => {
+                self.terminal.insertColumns(value);
+
+                try self.vt_stream.writeAll("\x1b[");
+                if (value != 1) try self.vt_stream.print("{d}", .{value});
+                try self.vt_stream.writeAll("'}");
+            },
+            .delete_columns => {
+                self.terminal.deleteColumns(value);
+
+                try self.vt_stream.writeAll("\x1b[");
+                if (value != 1) try self.vt_stream.print("{d}", .{value});
+                try self.vt_stream.writeAll("'~");
+            },
             .delete_lines => {
                 self.terminal.deleteLines(value);
 
@@ -451,58 +480,71 @@ pub const Handler = struct {
                 try self.vt_stream.writeByte(slot_char);
                 try self.vt_stream.writeByte(charset_char);
             },
-            .set_attribute => {
-                try self.terminal.setAttribute(value);
+            .set_attributes => {
+                try self.terminal.setAttributes(value.parser());
 
-                try self.vt_stream.writeAll("\x1b[");
-                switch (value) {
-                    .unset => {},
-                    .bold => try self.vt_stream.writeByte('1'),
-                    .faint => try self.vt_stream.writeByte('2'),
-                    .italic => try self.vt_stream.writeByte('3'),
-                    .underline => |u| switch (u) {
-                        .none => try self.vt_stream.writeAll("24"),
-                        .single => try self.vt_stream.writeByte('4'),
-                        .double => try self.vt_stream.writeAll("4:2"),
-                        .curly => try self.vt_stream.writeAll("4:3"),
-                        .dotted => try self.vt_stream.writeAll("4:4"),
-                        .dashed => try self.vt_stream.writeAll("4:5"),
-                    },
-                    .blink => try self.vt_stream.writeByte('5'),
-                    .inverse => try self.vt_stream.writeByte('7'),
-                    .invisible => try self.vt_stream.writeByte('8'),
-                    .strikethrough => try self.vt_stream.writeByte('9'),
-                    .reset_bold => try self.vt_stream.writeAll("22"),
-                    .reset_italic => try self.vt_stream.writeAll("23"),
-                    .reset_blink => try self.vt_stream.writeAll("25"),
-                    .reset_inverse => try self.vt_stream.writeAll("27"),
-                    .reset_invisible => try self.vt_stream.writeAll("28"),
-                    .reset_strikethrough => try self.vt_stream.writeAll("29"),
-                    .@"8_fg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 30}),
-                    .direct_color_fg => |c| try self.vt_stream.print("38;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
-                    .@"256_fg" => |idx| try self.vt_stream.print("38;5;{d}", .{idx}),
-                    .reset_fg => try self.vt_stream.writeAll("39"),
-                    .@"8_bg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 40}),
-                    .direct_color_bg => |c| try self.vt_stream.print("48;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
-                    .@"256_bg" => |idx| try self.vt_stream.print("48;5;{d}", .{idx}),
-                    .reset_bg => try self.vt_stream.writeAll("49"),
-                    .overline => try self.vt_stream.writeAll("53"),
-                    .reset_overline => try self.vt_stream.writeAll("55"),
-                    .underline_color => |c| try self.vt_stream.print("58;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
-                    .@"256_underline_color" => |idx| try self.vt_stream.print("58;5;{d}", .{idx}),
-                    .reset_underline_color => try self.vt_stream.writeAll("59"),
-                    .@"8_bright_fg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 82}),
-                    .@"8_bright_bg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 92}),
-                    // The "unknown" variant re-emits the raw parameters verbatim since
-                    // we can't map it to a known SGR code.
-                    .unknown => {
-                        for (value.unknown.full, 0..) |p, i| {
-                            if (i > 0) try self.vt_stream.writeByte(';');
-                            try self.vt_stream.print("{d}", .{p});
-                        }
-                    },
+                var parser = value.parser();
+                var empty = true;
+                while (parser.next()) |attribute| {
+                    switch (attribute) {
+                        .unknown => {
+                            // no_forward(unknown_sgr)
+                            // Unknown SGR attributes are applied to our terminal (where
+                            // they are a no-op) but are never forwarded to clients.
+                            continue;
+                        },
+                        else => {},
+                    }
+
+                    if (empty) {
+                        empty = false;
+                        try self.vt_stream.writeAll("\x1b[");
+                    } else {
+                        try self.vt_stream.writeByte(';');
+                    }
+
+                    switch (attribute) {
+                        .unset => try self.vt_stream.writeByte('0'),
+                        .bold => try self.vt_stream.writeByte('1'),
+                        .faint => try self.vt_stream.writeByte('2'),
+                        .italic => try self.vt_stream.writeByte('3'),
+                        .underline => |u| switch (u) {
+                            .none => try self.vt_stream.writeAll("24"),
+                            .single => try self.vt_stream.writeByte('4'),
+                            .double => try self.vt_stream.writeAll("4:2"),
+                            .curly => try self.vt_stream.writeAll("4:3"),
+                            .dotted => try self.vt_stream.writeAll("4:4"),
+                            .dashed => try self.vt_stream.writeAll("4:5"),
+                        },
+                        .blink => try self.vt_stream.writeByte('5'),
+                        .inverse => try self.vt_stream.writeByte('7'),
+                        .invisible => try self.vt_stream.writeByte('8'),
+                        .strikethrough => try self.vt_stream.writeByte('9'),
+                        .reset_bold => try self.vt_stream.writeAll("22"),
+                        .reset_italic => try self.vt_stream.writeAll("23"),
+                        .reset_blink => try self.vt_stream.writeAll("25"),
+                        .reset_inverse => try self.vt_stream.writeAll("27"),
+                        .reset_invisible => try self.vt_stream.writeAll("28"),
+                        .reset_strikethrough => try self.vt_stream.writeAll("29"),
+                        .@"8_fg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 30}),
+                        .direct_color_fg => |c| try self.vt_stream.print("38;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
+                        .@"256_fg" => |idx| try self.vt_stream.print("38;5;{d}", .{idx}),
+                        .reset_fg => try self.vt_stream.writeAll("39"),
+                        .@"8_bg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 40}),
+                        .direct_color_bg => |c| try self.vt_stream.print("48;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
+                        .@"256_bg" => |idx| try self.vt_stream.print("48;5;{d}", .{idx}),
+                        .reset_bg => try self.vt_stream.writeAll("49"),
+                        .overline => try self.vt_stream.writeAll("53"),
+                        .reset_overline => try self.vt_stream.writeAll("55"),
+                        .underline_color => |c| try self.vt_stream.print("58;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
+                        .@"256_underline_color" => |idx| try self.vt_stream.print("58;5;{d}", .{idx}),
+                        .reset_underline_color => try self.vt_stream.writeAll("59"),
+                        .@"8_bright_fg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 82}),
+                        .@"8_bright_bg" => |c| try self.vt_stream.print("{d}", .{@backingInt(c) + 92}),
+                        .unknown => unreachable,
+                    }
                 }
-                try self.vt_stream.writeByte('m');
+                if (!empty) try self.vt_stream.writeByte('m');
             },
             .protected_mode_off => {
                 self.terminal.setProtectedMode(.off);
